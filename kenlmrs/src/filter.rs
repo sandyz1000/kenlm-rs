@@ -1,6 +1,4 @@
 use crate::constant::{FilterMode, FormatEnum};
-use crate::kenlm::StringPiece;
-use crate::util::IStream;
 use std::collections::HashSet;
 use std::process::Output;
 
@@ -26,10 +24,10 @@ impl Default for Config {
         Config {
             batch_size: 25_000,
             threads: 4,
-            mode: FilterMode::MODE_COPY,
+            mode: FilterMode::ModeCopy,
             phrase: false,
             context: false,
-            format: FormatEnum::FORMAT_ARPA,
+            format: FormatEnum::FormatArpa,
         }
     }
 }
