@@ -4,17 +4,17 @@ use std::thread;
 use std::any::Any;
 
 
-struct Chain;
+pub struct Chain;
 
-struct RewindableStream;
+pub struct RewindableStream;
 
-struct Block;
+pub struct Block;
 
-struct PCQueue<T> {
+pub struct PCQueue<T> {
     // Implementation for the producer-consumer queue
 }
 
-struct MultiProgress;
+pub struct MultiProgress;
 
 impl MultiProgress {
     fn add(&self) -> WorkerProgress {
@@ -23,9 +23,9 @@ impl MultiProgress {
     }
 }
 
-struct WorkerProgress;
+pub struct WorkerProgress;
 
-struct ChainPosition {
+pub struct ChainPosition {
     in_: Arc<Mutex<PCQueue<Block>>>,
     out_: Arc<Mutex<PCQueue<Block>>>,
     chain_: Arc<Chain>,
@@ -49,7 +49,7 @@ impl ChainPosition {
     }
 }
 
-struct Thread {
+pub struct Thread {
     handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -95,7 +95,7 @@ impl Drop for Thread {
     }
 }
 
-struct Recycler;
+pub struct Recycler;
 
 impl Recycler {
     fn run(&self, position: &ChainPosition) {
