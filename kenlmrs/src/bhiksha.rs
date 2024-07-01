@@ -7,9 +7,6 @@ pub struct Config {
 }
 
 #[derive(Debug)]
-pub struct BinaryFormat;
-
-#[derive(Debug)]
 pub struct NodeRange {
     pub begin: u64,
     pub end: u64,

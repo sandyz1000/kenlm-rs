@@ -2,13 +2,12 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::mem::{size_of, MaybeUninit};
 use std::ptr::{null_mut, write};
 
-use crate::utils::file_piece::FilePiece;
+use crate::utils::file::FilePiece;
 
 type WordIndex = u32;
 type ProbBackoff = f32;
 type Config = ();
 
-struct BinaryFormat;
 struct SortedVocabulary;
 struct SortedFiles;
 struct UnigramPointer;

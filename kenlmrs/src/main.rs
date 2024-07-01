@@ -12,6 +12,10 @@ pub mod utils;
 pub mod model;
 pub mod trie;
 pub mod quantize;
+pub mod error;
+pub mod config;
+pub mod arpa;
+pub mod vocabulary;
 
 fn main() {
     print!("Hello world!");

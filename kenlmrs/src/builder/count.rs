@@ -187,11 +187,6 @@ struct ChainPosition {
     // Fields for ChainPosition
 }
 
-// Placeholder for util::FilePiece equivalent in Rust
-struct FilePiece {
-    // Fields and methods for FilePiece
-}
-
 
 #[derive(Debug, Clone)]
 pub struct CombineCounts;

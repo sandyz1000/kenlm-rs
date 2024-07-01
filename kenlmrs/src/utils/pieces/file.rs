@@ -35,6 +35,8 @@ impl<'a> Iterator for LineIterator<'a> {
 // Define the FilePiece struct
 pub struct FilePiece {
     file: File,
+    // data: String,
+    // offset: usize,
     file_name: String,
     buffer_size: usize,
 }
@@ -50,8 +52,42 @@ impl FilePiece {
         })
     }
 
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+    
+    pub fn get(&self) -> char {
+        self.data.chars().nth(self.offset).unwrap()
+    }
+    
     fn begin(&self) -> LineIterator {
         LineIterator::new(self, '\n')
+    }
+
+    pub fn read_float(&mut self) -> f32 {
+        let mut chars = self.data[self.offset..].chars();
+        let mut result = String::new();
+        while let Some(c) = chars.next() {
+            if c.is_whitespace() || c == '\t' {
+                break;
+            }
+            result.push(c);
+            self.offset += 1;
+        }
+        f32::from_str(&result).unwrap()
+    }
+
+    pub fn read_delimited(&mut self, delimiters: &[bool; 256]) -> String {
+        let mut result = String::new();
+        while self.offset < self.data.len() {
+            let c = self.data.chars().nth(self.offset).unwrap();
+            if delimiters[c as usize] {
+                break;
+            }
+            result.push(c);
+            self.offset += 1;
+        }
+        result
     }
 
     fn read_line(&self, delim: char, strip_cr: bool) -> io::Result<String> {
@@ -62,11 +98,6 @@ impl FilePiece {
             buffer = buffer.trim_end_matches('\r').to_string();
         }
         Ok(buffer)
-    }
-
-    fn read_float(&self) -> Result<f32, Error> {
-        // ParseNumberException
-        self.read_number::<f32>()
     }
 
     fn read_double(&self) -> Result<f64, Error> {

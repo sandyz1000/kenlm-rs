@@ -1,2 +1,2 @@
-pub mod file_piece;
 pub mod error;
+pub mod pieces;

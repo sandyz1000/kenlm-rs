@@ -1,5 +1,5 @@
 #[derive(Debug, Clone)]
-pub(crate) enum ARPALoadComplain {
+pub enum ARPALoadComplain {
     All,
     Expensive,
     None,
@@ -19,7 +19,7 @@ pub enum RestFunction {
 }
 
 #[derive(Debug)]
-pub(crate) enum FilterMode {
+pub enum FilterMode {
     ModeCopy,
     ModeSingle,
     ModeMultiple,
@@ -28,7 +28,7 @@ pub(crate) enum FilterMode {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum WarningAction {
+pub enum WarningAction {
     ThrowUp,
     Complain,
     Silent,
@@ -38,7 +38,7 @@ pub(crate) enum WarningAction {
 // Constant PYX below
 // ------------------
 #[derive(Debug)]
-pub(crate) enum ModelType {
+pub enum ModelType {
     Probing,
     RestProbing,
     Trie,
@@ -48,13 +48,13 @@ pub(crate) enum ModelType {
 }
 
 #[derive(Debug)]
-pub(crate) enum Format {
+pub enum Format {
     FormatArpa,
     FormatCount,
 }
 
 #[derive(Debug)]
-pub(crate) enum LoadMethod {
+pub enum LoadMethod {
     Lazy,
     PopulateOrLazy,
     PopulateOrRead,
@@ -63,13 +63,13 @@ pub(crate) enum LoadMethod {
 }
 
 #[derive(Debug)]
-pub(crate) enum FormatEnum {
+pub enum FormatEnum {
     FormatArpa,
     FormatCount,
 }
 
 #[derive(Debug)]
-pub(crate) enum HookType {
+pub enum HookType {
     // Probability and backoff (or just q). Output must process the orders in
     // parallel or there will be a deadlock.
     ProbParallelHook,
