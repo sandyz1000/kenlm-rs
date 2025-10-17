@@ -1,123 +1,287 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::error::LMError as Error;
+use crate::error::LMError;
 
-// Define the LineIterator struct
-pub struct LineIterator<'a> {
-    backing: Option<&'a FilePiece>,
-    lines: Box<dyn Iterator<Item = io::Result<String>> + 'a>,
-}
+const DEFAULT_BUFFER_SIZE: usize = 1048576; // 1 MB
 
-impl<'a> LineIterator<'a> {
-    fn new(file_piece: &'a FilePiece, delim: char) -> Self {
-        let reader = BufReader::new(&file_piece.file);
-        let lines = Box::new(reader.lines());
-        Self {
-            backing: Some(file_piece),
-            lines,
-        }
-    }
-}
-
-impl<'a> Iterator for LineIterator<'a> {
-    type Item = io::Result<String>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.lines.next()
-    }
-}
-
-// Define the FilePiece struct
+/// FilePiece reads text files, handling memory-mapped IO efficiently
+/// and parsing numbers and delimited strings
 pub struct FilePiece {
     file: File,
-    // data: String,
-    // offset: usize,
     file_name: String,
-    buffer_size: usize,
+    buffer: Vec<u8>,
+    position: usize,      // Current position in buffer
+    buffer_end: usize,    // End of valid data in buffer
+    total_size: u64,      // Total file size
+    file_position: u64,   // Current position in file
+    at_end: bool,
 }
 
 impl FilePiece {
-    fn new<P: AsRef<Path>>(path: P, buffer_size: usize) -> io::Result<Self> {
+    /// Create a new FilePiece from a file path
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, LMError> {
         let file = File::open(&path)?;
         let file_name = path.as_ref().to_string_lossy().to_string();
-        Ok(Self {
+        let total_size = file.metadata()?.len();
+        
+        let mut fp = Self {
             file,
             file_name,
-            buffer_size,
-        })
+            buffer: vec![0u8; DEFAULT_BUFFER_SIZE],
+            position: 0,
+            buffer_end: 0,
+            total_size,
+            file_position: 0,
+            at_end: false,
+        };
+        
+        fp.shift()?;
+        Ok(fp)
     }
 
-    pub fn offset(&self) -> usize {
-        self.offset
+    /// Get the file name
+    pub fn file_name(&self) -> &str {
+        &self.file_name
     }
 
-    pub fn get(&self) -> char {
-        self.data.chars().nth(self.offset).unwrap()
-    }
-
-    fn begin(&self) -> LineIterator {
-        LineIterator::new(self, '\n')
-    }
-
-    pub fn read_float(&mut self) -> f32 {
-        let mut chars = self.data[self.offset..].chars();
-        let mut result = String::new();
-        while let Some(c) = chars.next() {
-            if c.is_whitespace() || c == '\t' {
-                break;
+    /// Peek at the current character without consuming it
+    pub fn peek(&mut self) -> Result<char, LMError> {
+        if self.position >= self.buffer_end {
+            self.shift()?;
+            if self.at_end {
+                return Err(LMError::IoError(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "End of file",
+                )));
             }
-            result.push(c);
-            self.offset += 1;
         }
-        f32::from_str(&result).unwrap()
+        Ok(self.buffer[self.position] as char)
     }
 
-    pub fn read_delimited(&mut self, delimiters: &[bool; 256]) -> String {
+    /// Get and consume the current character
+    pub fn get(&mut self) -> Result<char, LMError> {
+        let c = self.peek()?;
+        self.position += 1;
+        Ok(c)
+    }
+
+    /// Read a float from the current position
+    pub fn read_float(&mut self) -> Result<f32, LMError> {
+        self.skip_spaces();
+        let s = self.read_until_space()?;
+        s.parse::<f32>()
+            .map_err(|_| LMError::ParseError(format!("Failed to parse float: {}", s)))
+    }
+
+    /// Read a double from the current position
+    pub fn read_double(&mut self) -> Result<f64, LMError> {
+        self.skip_spaces();
+        let s = self.read_until_space()?;
+        s.parse::<f64>()
+            .map_err(|_| LMError::ParseError(format!("Failed to parse double: {}", s)))
+    }
+
+    /// Read an unsigned long from the current position
+    pub fn read_ulong(&mut self) -> Result<u64, LMError> {
+        self.skip_spaces();
+        let s = self.read_until_space()?;
+        s.parse::<u64>()
+            .map_err(|_| LMError::ParseError(format!("Failed to parse ulong: {}", s)))
+    }
+
+    /// Read delimited string based on delimiter table
+    pub fn read_delimited(&mut self, delimiters: &[bool; 256]) -> Result<String, LMError> {
+        self.skip_delimiters(delimiters);
         let mut result = String::new();
-        while self.offset < self.data.len() {
-            let c = self.data.chars().nth(self.offset).unwrap();
+        
+        loop {
+            if self.position >= self.buffer_end {
+                self.shift()?;
+                if self.at_end {
+                    break;
+                }
+            }
+            
+            let c = self.buffer[self.position];
             if delimiters[c as usize] {
                 break;
             }
+            
+            result.push(c as char);
+            self.position += 1;
+        }
+        
+        Ok(result)
+    }
+
+    /// Read a line until delimiter (typically '\n')
+    pub fn read_line(&mut self, delim: char, strip_cr: bool) -> Result<String, LMError> {
+        let mut result = String::new();
+        
+        loop {
+            if self.position >= self.buffer_end {
+                self.shift()?;
+                if self.at_end && result.is_empty() {
+                    return Err(LMError::IoError(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "End of file",
+                    )));
+                }
+                if self.at_end {
+                    break;
+                }
+            }
+            
+            let c = self.buffer[self.position] as char;
+            self.position += 1;
+            
+            if c == delim {
+                break;
+            }
+            
             result.push(c);
-            self.offset += 1;
         }
-        result
-    }
-
-    pub fn read_line(&self, delim: char, strip_cr: bool) -> io::Result<String> {
-        let mut reader = BufReader::new(&self.file);
-        let mut buffer = String::new();
-        reader.read_line(&mut buffer)?;
-        if strip_cr {
-            buffer = buffer.trim_end_matches('\r').to_string();
+        
+        if strip_cr && result.ends_with('\r') {
+            result.pop();
         }
-        Ok(buffer)
+        
+        Ok(result)
     }
 
-    fn read_double(&self) -> Result<f64, Error> {
-        // ParseNumberException
-        self.read_number::<f64>()
+    /// Skip whitespace characters
+    fn skip_spaces(&mut self) {
+        loop {
+            if self.position >= self.buffer_end {
+                if self.shift().is_err() || self.at_end {
+                    break;
+                }
+            }
+            
+            let c = self.buffer[self.position];
+            if !c.is_ascii_whitespace() {
+                break;
+            }
+            
+            self.position += 1;
+        }
     }
 
-    fn read_long(&self) -> Result<i64, Error> {
-        self.read_number::<i64>()
+    /// Skip characters based on delimiter table
+    fn skip_delimiters(&mut self, delimiters: &[bool; 256]) {
+        loop {
+            if self.position >= self.buffer_end {
+                if self.shift().is_err() || self.at_end {
+                    break;
+                }
+            }
+            
+            let c = self.buffer[self.position];
+            if !delimiters[c as usize] {
+                break;
+            }
+            
+            self.position += 1;
+        }
     }
 
-    fn read_ulong(&self) -> Result<u64, Error> {
-        // ParseNumberException
-        self.read_number::<u64>()
+    /// Read until whitespace
+    fn read_until_space(&mut self) -> Result<String, LMError> {
+        let mut result = String::new();
+        
+        loop {
+            if self.position >= self.buffer_end {
+                self.shift()?;
+                if self.at_end {
+                    break;
+                }
+            }
+            
+            let c = self.buffer[self.position];
+            if c.is_ascii_whitespace() {
+                break;
+            }
+            
+            result.push(c as char);
+            self.position += 1;
+        }
+        
+        if result.is_empty() {
+            return Err(LMError::ParseError("Empty token".to_string()));
+        }
+        
+        Ok(result)
     }
 
-    fn read_number<T: FromStr>(&self) -> Result<T, Error> {
-        // ParseNumberException
-        let line = self
-            .read_line('\n', true)
-            .map_err(|e| Error::ParseNumberException(e.to_string()))?;
-        line.parse::<T>()
-            .map_err(|_| Error::ParseNumberException(line))
+    /// Refill the buffer from the file
+    fn shift(&mut self) -> Result<(), LMError> {
+        if self.at_end {
+            return Ok(());
+        }
+
+        // Move any remaining data to the beginning of the buffer
+        if self.position < self.buffer_end {
+            let remaining = self.buffer_end - self.position;
+            self.buffer.copy_within(self.position..self.buffer_end, 0);
+            self.buffer_end = remaining;
+            self.position = 0;
+        } else {
+            self.buffer_end = 0;
+            self.position = 0;
+        }
+
+        // Read more data
+        let bytes_read = self.file.read(&mut self.buffer[self.buffer_end..])?;
+        self.buffer_end += bytes_read;
+        self.file_position += bytes_read as u64;
+
+        if bytes_read == 0 {
+            self.at_end = true;
+        }
+
+        Ok(())
+    }
+
+    /// Check if at end of file
+    pub fn at_end(&self) -> bool {
+        self.at_end && self.position >= self.buffer_end
+    }
+
+    /// Get current offset in file
+    pub fn offset(&self) -> u64 {
+        self.file_position - (self.buffer_end - self.position) as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_read_float() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "3.14159").unwrap();
+        file.flush().unwrap();
+
+        let mut fp = FilePiece::open(file.path()).unwrap();
+        let val = fp.read_float().unwrap();
+        assert!((val - 3.14159).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_read_line() {
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "line1\nline2\nline3").unwrap();
+        file.flush().unwrap();
+
+        let mut fp = FilePiece::open(file.path()).unwrap();
+        assert_eq!(fp.read_line('\n', false).unwrap(), "line1");
+        assert_eq!(fp.read_line('\n', false).unwrap(), "line2");
+        assert_eq!(fp.read_line('\n', false).unwrap(), "line3");
     }
 }

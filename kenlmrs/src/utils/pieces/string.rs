@@ -52,11 +52,13 @@ impl<'a> StringPiece<'a> {
     }
 
     pub fn set_from_ptr(&mut self, data: *const u8, len: usize) {
-        self.ptr = unsafe { std::slice::from_raw_parts(data, len) }
-            .iter()
-            .map(|&b| b as char)
-            .collect::<String>()
-            .get(0..len);
+        // Convert bytes to a string - this requires the data to be valid UTF-8
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            self.ptr = Some(s);
+        } else {
+            self.ptr = None;
+        }
     }
 
     pub fn remove_prefix(&mut self, n: usize) {
@@ -90,6 +92,10 @@ impl<'a> StringPiece<'a> {
 
     pub fn as_string(&self) -> String {
         self.ptr.unwrap_or("").to_string()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.ptr.unwrap_or("")
     }
 
     pub fn starts_with(&self, x: &StringPiece) -> bool {
@@ -292,14 +298,19 @@ impl<'a> StringPiece<'a> {
             return None;
         }
 
+        let s = self.ptr?;
         let pos = pos.unwrap_or_else(|| self.size() - 1);
-        self.ptr?
-            .chars()
-            .take(pos + 1)
-            .enumerate()
-            .rev()
-            .find(|(_, ch)| *ch != c)
-            .map(|(i, _)| i)
+
+        // Collect chars up to pos and search backwards
+        let chars: Vec<(usize, char)> = s.chars().take(pos + 1).enumerate().collect();
+
+        // Search from the end
+        for (i, ch) in chars.iter().rev() {
+            if *ch != c {
+                return Some(*i);
+            }
+        }
+        None
     }
 }
 

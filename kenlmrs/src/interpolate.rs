@@ -43,18 +43,25 @@ impl SplitWorker {
     // Constructs a split worker for a particular order. It writes the
     // split-off backoff values to the backoff chain and the ngram id and
     // probability to the sort chain for each ngram in the input.
-    fn new(order: i64, backoff_chain: &Chain, sort_chain: &Chain) -> Self {}
+    fn new(_order: i64, _backoff_chain: &Chain, _sort_chain: &Chain) -> Self {
+        SplitWorker
+    }
 
     // The callback invoked to handle the input from the ngram intermediate files.
-    pub fn run(&self, position: &ChainPosition) {}
+    pub fn run(&self, _position: &ChainPosition) {
+        // TODO: Implement split worker logic
+    }
 }
 
 pub fn tune_weights(
-    tune_file: i64,
-    model_names: &Vec<StringPiece>,
-    config: &InstancesConfig,
-    weights_out: &Vec<f64>,
+    _tune_file: i64,
+    _model_names: &Vec<StringPiece>,
+    _config: &InstancesConfig,
+    _weights_out: &Vec<f64>,
 ) {
+    // TODO: Implement weight tuning
 }
 
-pub fn pipeline(models: &FixedArray<ModelBuffer>, config: &Config, write_file: i64) {}
+pub fn pipeline(_models: &FixedArray<ModelBuffer>, _config: &Config, _write_file: i64) {
+    // TODO: Implement interpolation pipeline
+}

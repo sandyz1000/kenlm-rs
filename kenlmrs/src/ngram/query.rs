@@ -1,5 +1,5 @@
 use crate::types::{FullScoreReturn, State, WordIndex};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 
 #[derive(Debug)]
 pub struct QueryPrinter {
@@ -11,7 +11,7 @@ pub struct QueryPrinter {
 }
 
 impl QueryPrinter {
-    fn new(fd: i32, print_word: bool, print_line: bool, print_summary: bool, flush: bool) -> Self {
+    fn new(_fd: i32, print_word: bool, print_line: bool, print_summary: bool, flush: bool) -> Self {
         QueryPrinter {
             out: io::stdout(),
             print_word,
@@ -116,10 +116,10 @@ fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, prin
     let mut ret;
     let mut word = String::new();
 
-    let mut corpus_total = 0.0;
-    let mut corpus_total_oov_only = 0.0;
-    let mut corpus_oov = 0;
-    let mut corpus_tokens = 0;
+    let mut corpus_total = 0.0_f32;
+    let mut corpus_total_oov_only = 0.0_f32;
+    let mut corpus_oov = 0_u64;
+    let mut corpus_tokens = 0_u64;
 
     let mut in_reader = io::stdin();
 
@@ -134,22 +134,22 @@ fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, prin
 
         while in_reader.read_line(&mut word).unwrap() > 0 {
             let vocab = model.get_vocabulary().index(&word);
-            ret = model.full_score(state, vocab, &mut out);
+            ret = model.full_score(state.clone(), vocab, &mut out);
             if vocab == model.get_vocabulary().not_found() {
                 oov += 1;
                 corpus_total_oov_only += ret.prob;
             }
             total += ret.prob;
-            printer.word(&word, vocab, &ret);
+            printer.word(&word, vocab as usize, &ret);
             corpus_tokens += 1;
-            state = out;
+            state = out.clone();
         }
 
         if sentence_context {
             ret = model.full_score(state, model.get_vocabulary().end_sentence(), &mut out);
             total += ret.prob;
             corpus_tokens += 1;
-            printer.word("</s>", model.get_vocabulary().end_sentence(), &ret);
+            printer.word("</s>", model.get_vocabulary().end_sentence() as usize, &ret);
         }
         printer.line(oov, total);
         corpus_total += total;
@@ -157,9 +157,8 @@ fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, prin
     }
 
     printer.summary(
-        10.0_f64.powf(-(corpus_total / corpus_tokens as f64)),
-        10.0_f64
-            .powf(-((corpus_total - corpus_total_oov_only) / (corpus_tokens - corpus_oov) as f64)),
+        10.0_f64.powf(-(corpus_total as f64 / corpus_tokens as f64)),
+        10.0_f64.powf(-((corpus_total - corpus_total_oov_only) as f64 / (corpus_tokens - corpus_oov) as f64)),
         corpus_oov,
         corpus_tokens,
     );

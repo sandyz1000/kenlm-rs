@@ -1,14 +1,12 @@
 pub mod binary_format;
 pub mod query;
 pub mod search;
-
-use crate::constant::{ARPALoadComplain, RestFunction, WarningAction, WriteMethod};
-use crate::types::{ModelType, State, WordIndex};
-use std::cell::RefCell;
-use std::fmt::{Debug, Display};
-use std::fs::{File, FileType};
-use std::io::prelude::*;
-use std::io::{BufRead, BufReader};
+use crate::ngram::query::QueryPrinter;
+use crate::ngram::search::LongestPointer;
+use crate::types::{Config, ModelType, State, WordIndex};
+use crate::utils::pieces::string::StringPiece;
+use crate::vocabulary::{ProbingVocabulary, SortedVocabulary};
+use std::marker::PhantomData;
 
 type Node = NodeRange;
 
@@ -31,7 +29,9 @@ pub struct Unigram;
 pub struct BitPacked;
 
 #[derive(Debug)]
-pub struct BitPackedMiddle<Bhiksha>;
+pub struct BitPackedMiddle<Bhiksha> {
+    _phantom: PhantomData<Bhiksha>,
+}
 
 #[derive(Debug)]
 pub struct BitPackedLongest;
@@ -41,6 +41,7 @@ pub struct GenericModel<Search, VocabularyT> {
     // This is the model type returned by RecognizeBinary.
     k_model_type: ModelType,
     k_version: i64,
+    _phantom: PhantomData<(Search, VocabularyT)>,
 }
 
 #[derive(Debug)]
@@ -50,68 +51,90 @@ pub struct RestValue;
 pub struct BackoffValue;
 
 #[derive(Debug)]
-pub struct HashedSearch<Value>;
+pub struct HashedSearch<Value> {
+    _phantom: PhantomData<Value>,
+}
 
 #[derive(Debug, Clone, Copy)]
-pub struct TrieSearch<Quant, Bhiksha>;
+pub struct TrieSearch<Quant, Bhiksha> {
+    _phantom: PhantomData<(Quant, Bhiksha)>,
+}
+
+/// Trait for value types in search implementations
+pub trait Value {
+    fn new() -> Self;
+}
 
 impl Value for RestValue {
     fn new() -> Self {
-        todo!()
+        RestValue
     }
 }
 
 impl Value for BackoffValue {
     fn new() -> Self {
-        todo!()
+        BackoffValue
     }
 }
 
-impl Config {
-    // pub fn ProgressMessages() -> ostream;
-}
-
 impl State {
-    pub fn Compare(&self, other: &State) {
+    pub fn Compare(&self, _other: &State) {
         // TODO: Implement state comparison
         todo!()
     }
 }
 
-trait VocabularyT {
-    fn new() -> Self {}
-
-    fn Index(&self, inp_str: &StringPiece) -> WordIndex {}
+pub trait VocabularyT {
+    fn new() -> Self;
+    fn index(&self, inp_str: &StringPiece) -> WordIndex;
 }
 
 impl VocabularyT for SortedVocabulary {
     fn new() -> Self {
-        return SortedVocabulary();
+        SortedVocabulary::new()
     }
 
-    fn Index(&self, inp_str: &StringPiece) -> WordIndex {}
+    fn index(&self, inp_str: &StringPiece) -> WordIndex {
+        use crate::vocabulary::Vocabulary;
+        Vocabulary::index(self, inp_str.as_str())
+    }
 }
 
 impl VocabularyT for ProbingVocabulary {
     fn new() -> Self {
-        return ProbingVocabulary();
+        ProbingVocabulary::new()
     }
 
-    fn Index(&self, inp_str: &StringPiece) -> WordIndex {}
+    fn index(&self, inp_str: &StringPiece) -> WordIndex {
+        use crate::vocabulary::Vocabulary;
+        Vocabulary::index(self, inp_str.as_str())
+    }
 }
 
 pub fn Query<Model, Printer>(
-    file: &str,
-    config: &Config,
-    sentence_context: bool,
-    printer: &QueryPrinter,
+    _file: &str,
+    _config: &Config,
+    _sentence_context: bool,
+    _printer: &QueryPrinter,
 ) {
+    // TODO: Implement query
 }
 
-pub fn RecognizeBinary(file: &str, recognized: &ModelType) -> bool {}
+pub fn RecognizeBinary(_file: &str, _recognized: &ModelType) -> bool {
+    // TODO: Implement binary format recognition
+    false
+}
 
-pub fn LookupLongest(word: WordIndex, node: &Node) -> LongestPointer {}
+pub fn LookupLongest(_word: WordIndex, _node: &Node) -> LongestPointer {
+    // TODO: Implement longest lookup
+    LongestPointer
+}
 
-pub fn FastMakeNode(begin: WordIndex, end: WordIndex, node: &Node) -> bool {}
+pub fn FastMakeNode(_begin: WordIndex, _end: WordIndex, _node: &Node) -> bool {
+    // TODO: Implement fast node creation
+    false
+}
 
-pub fn ShowSizes(file: &str, config: &Config) {}
+pub fn ShowSizes(_file: &str, _config: &Config) {
+    // TODO: Implement size display
+}

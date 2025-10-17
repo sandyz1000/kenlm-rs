@@ -1,8 +1,7 @@
 use crate::constant::*;
-use crate::error::LMError;
-use crate::types::{Config, WordIndex};
+use crate::types::WordIndex;
+use crate::utils::hash::{hash_for_vocab, UNKNOWN_HASH, UNKNOWN_CAP_HASH};
 use std::collections::HashMap;
-use std::hash::BuildHasher;
 
 /// Base vocabulary trait that all vocabulary implementations must follow
 pub trait Vocabulary {
@@ -49,7 +48,7 @@ pub struct BaseVocabulary {
     end_sentence: WordIndex,
     not_found: WordIndex,
     bound: WordIndex,
-    saw_unk: bool,
+    saw_unk: std::cell::Cell<bool>, // Use Cell for interior mutability
 }
 
 impl Vocabulary for BaseVocabulary {
@@ -87,7 +86,7 @@ impl Vocabulary for BaseVocabulary {
     }
 
     fn saw_unk(&self) -> bool {
-        self.saw_unk
+        self.saw_unk.get()
     }
 }
 
@@ -98,7 +97,7 @@ impl BaseVocabulary {
             end_sentence: EOS_WORD,
             not_found: UNK_WORD,
             bound: 3, // Start with 3 special words
-            saw_unk: false,
+            saw_unk: std::cell::Cell::new(false),
         }
     }
 
@@ -116,8 +115,8 @@ impl BaseVocabulary {
         self.bound = bound;
     }
 
-    pub fn set_saw_unk(&mut self, saw_unk: bool) {
-        self.saw_unk = saw_unk;
+    pub fn set_saw_unk(&self, saw_unk: bool) {
+        self.saw_unk.set(saw_unk);
     }
 }
 
@@ -208,9 +207,11 @@ impl Default for ProbingVocabulary {
 }
 
 /// Sorted vocabulary for memory-efficient storage and binary search
+/// Uses hash-based lookups similar to KenLM's SortedVocabulary
 pub struct SortedVocabulary {
     base: BaseVocabulary,
-    words: Vec<String>,
+    hashes: Vec<u64>,       // Sorted hashes for binary search
+    strings: Vec<String>,    // Corresponding strings for enumeration
     sorted: bool,
 }
 
@@ -228,17 +229,29 @@ impl Vocabulary for SortedVocabulary {
     }
 
     fn index(&self, str: &str) -> WordIndex {
+        let hash = hash_for_vocab(str);
+        
+        // Check for special unknown tokens
+        if hash == UNKNOWN_HASH || hash == UNKNOWN_CAP_HASH {
+            self.base.set_saw_unk(true);
+            return 0; // UNK_WORD
+        }
+        
         if !self.sorted {
             // Linear search if not sorted yet
-            for (i, word) in self.words.iter().enumerate() {
-                if word == str {
-                    return i as WordIndex;
+            for (i, &h) in self.hashes.iter().enumerate() {
+                if h == hash {
+                    // Add 1 because index 0 is reserved for <unk>
+                    return (i + 1) as WordIndex;
                 }
             }
         } else {
             // Binary search if sorted
-            match self.words.binary_search(&str.to_string()) {
-                Ok(index) => return index as WordIndex,
+            match self.hashes.binary_search(&hash) {
+                Ok(index) => {
+                    // Add 1 because index 0 is reserved for <unk>
+                    return (index + 1) as WordIndex;
+                }
                 Err(_) => {}
             }
         }
@@ -268,27 +281,80 @@ impl SortedVocabulary {
     pub fn new() -> Self {
         Self {
             base: BaseVocabulary::new(),
-            words: Vec::new(),
+            hashes: Vec::new(),
+            strings: Vec::new(),
             sorted: false,
         }
     }
 
-    /// Add a word to the vocabulary
-    pub fn add_word(&mut self, word: &str) {
-        self.words.push(word.to_string());
+    /// Insert a word into the vocabulary during loading
+    /// Returns the word index (1-based, with 0 reserved for <unk>)
+    pub fn insert(&mut self, word: &str) -> WordIndex {
+        let hash = hash_for_vocab(word);
+        
+        // Check for special unknown tokens
+        if hash == UNKNOWN_HASH || hash == UNKNOWN_CAP_HASH {
+            self.base.set_saw_unk(true);
+            return 0; // UNK_WORD
+        }
+        
+        self.hashes.push(hash);
+        self.strings.push(word.to_string());
         self.sorted = false;
-        self.base.set_bound(self.words.len() as WordIndex);
+        
+        // Return 1-based index (0 is reserved for <unk>)
+        let index = self.hashes.len() as WordIndex;
+        self.base.set_bound(index + 1); // +1 to account for <unk> at 0
+        index
     }
 
-    /// Sort the vocabulary for efficient binary search
-    pub fn sort(&mut self) {
-        self.words.sort();
+    /// Add a word to the vocabulary (alias for insert)
+    pub fn add_word(&mut self, word: &str) -> WordIndex {
+        self.insert(word)
+    }
+
+    /// Finish loading the vocabulary
+    /// Sorts the hashes and reorders strings accordingly for efficient lookup
+    pub fn finished_loading(&mut self) {
+        if self.sorted {
+            return;
+        }
+
+        // Create indices for sorting
+        let mut indices: Vec<usize> = (0..self.hashes.len()).collect();
+        
+        // Sort indices by hash values
+        indices.sort_by_key(|&i| self.hashes[i]);
+        
+        // Reorder both hashes and strings
+        let old_hashes = self.hashes.clone();
+        let old_strings = self.strings.clone();
+        
+        for (new_pos, &old_pos) in indices.iter().enumerate() {
+            self.hashes[new_pos] = old_hashes[old_pos];
+            self.strings[new_pos] = old_strings[old_pos].clone();
+        }
+        
         self.sorted = true;
     }
 
-    /// Get word by index
+    /// Sort the vocabulary for efficient binary search (alias for finished_loading)
+    pub fn sort(&mut self) {
+        self.finished_loading();
+    }
+
+    /// Get word by index (0 = <unk>, 1+ = actual words)
     pub fn word(&self, index: WordIndex) -> Option<&str> {
-        self.words.get(index as usize).map(|s| s.as_str())
+        if index == 0 {
+            Some("<unk>")
+        } else {
+            self.strings.get((index - 1) as usize).map(|s| s.as_str())
+        }
+    }
+
+    /// Get the number of words in vocabulary (including <unk>)
+    pub fn size(&self) -> WordIndex {
+        (self.hashes.len() + 1) as WordIndex
     }
 }
 

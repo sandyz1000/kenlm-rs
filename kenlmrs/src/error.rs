@@ -1,17 +1,35 @@
 #[derive(Debug, thiserror::Error)]
 pub enum LMError {
-    #[error("Configuration error in Langauge Model")]
-    ConfigError,
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
 
-    #[error("Error while while Ken Language model")]
-    LoadError,
+    #[error("Error loading language model: {0}")]
+    LoadError(String),
 
-    #[error("Formatting error!!")]
-    FormatLoadError,
+    #[error("Format error: {0}")]
+    FormatError(String),
 
-    #[error("Error while loading vocabulary file")]
-    VocabLoadError,
+    #[error("Error loading vocabulary: {0}")]
+    VocabError(String),
 
-    #[error("Special word missing error")]
-    SpecialWordMissingError,
+    #[error("Special word missing: {0}")]
+    SpecialWordMissingError(String),
+
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
+    #[error("Unsupported model type")]
+    UnsupportedModelType,
+
+    #[error("Binary format version mismatch: expected {expected}, got {actual}")]
+    VersionMismatch { expected: u32, actual: u32 },
+
+    #[error("Invalid ARPA file: {0}")]
+    InvalidArpa(String),
+
+    #[error("Positive log probability encountered: {0}")]
+    PositiveLogProbability(f32),
 }

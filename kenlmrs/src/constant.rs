@@ -10,6 +10,18 @@ pub const EOS_WORD: u32 = 2;
 pub const DEFAULT_UNKNOWN_PROB: f32 = -100.0;
 pub const DEFAULT_PROBING_MULTIPLIER: f32 = 1.5;
 
+/// Binary format magic string
+pub const BINARY_MAGIC: &str = "mmap lm http://kheafield.com/code";
+
+/// Model version
+pub const MODEL_VERSION: u32 = 5;
+
+/// Extension constants for quantization
+pub const K_EXTENSION_QUANT: u64 = 1;
+pub const K_NO_EXTENSION_QUANT: u64 = 0;
+pub const K_EXTENSION_BACKOFF: f32 = std::f32::NEG_INFINITY;
+pub const K_NO_EXTENSION_BACKOFF: f32 = 0.0;
+
 #[derive(Debug, Clone)]
 pub enum ARPALoadComplain {
     All,
@@ -19,14 +31,14 @@ pub enum ARPALoadComplain {
 
 #[derive(Debug, Clone)]
 pub enum WriteMethod {
-    WriteMmap,  // Map the file directly.
+    WriteMmap, // Map the file directly.
     WriteAfter, // Write after we're done.
 }
 
 // Left rest options. Only used when the model includes rest costs.
 #[derive(Debug, Clone)]
 pub enum RestFunction {
-    RestMax,   // Maximum of any score to the left
+    RestMax, // Maximum of any score to the left
     RestLower, // Use lower-order files given below.
 }
 
@@ -39,10 +51,11 @@ pub enum FilterMode {
     ModeUnset,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum WarningAction {
     ThrowUp,
     Complain,
+    #[default]
     Silent,
 }
 

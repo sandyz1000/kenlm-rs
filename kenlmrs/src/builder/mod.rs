@@ -6,7 +6,7 @@ mod pipeline;
 mod proba;
 
 use crate::constant::WarningAction;
-use crate::types::{ProbBackoff, WordIndex};
+use crate::types::{ ProbBackoff, WordIndex };
 // TODO: Add proper imports for util types when they exist
 // use crate::util::{Chains, FilePiece, SortConfig, ChainConfig, ChainPosition, StringPiece};
 use std::cmp;
@@ -36,9 +36,9 @@ pub struct HeaderInfo {
 impl HeaderInfo {
     fn new(input_file_in: &str, token_count_in: u64, counts_pruned_in: &Vec<u64>) -> Self {
         HeaderInfo {
-            input_file: input_file_in,
+            input_file: input_file_in.to_string(),
             token_count: token_count_in,
-            counts_pruned: counts_pruned_in,
+            counts_pruned: counts_pruned_in.clone(),
         }
     }
 }
@@ -46,9 +46,9 @@ impl HeaderInfo {
 #[derive(Debug, Clone)]
 pub struct OutputHook;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 struct Uninterpolated {
-    prob: f32,  // Uninterpolated probability
+    prob: f32, // Uninterpolated probability
     gamma: f32, // Interpolation weight for lower order
 }
 
@@ -67,7 +67,7 @@ pub struct BuildingPayload {
 impl BuildingPayload {
     pub fn is_marked(&self) -> bool {
         match self.payload {
-            PayloadType::Count(count) => count >> (std::mem::size_of::<u64>() * 8 - 1) != 0,
+            PayloadType::Count(count) => (count >> (std::mem::size_of::<u64>() * 8 - 1)) != 0,
             _ => false,
         }
     }
@@ -92,11 +92,7 @@ impl BuildingPayload {
     }
 
     pub fn cutoff_count(&self) -> u64 {
-        if self.is_marked() {
-            0
-        } else {
-            self.unmarked_count()
-        }
+        if self.is_marked() { 0 } else { self.unmarked_count() }
     }
 }
 
@@ -122,7 +118,7 @@ impl CorpusCount {
 
     // type_count aka vocabulary size.  Initialize to an estimate.  It is set to the exact value.
     fn new(
-        from_: &FilePiece,
+        from_: &crate::utils::pieces::file::FilePiece,
         vocab_write: i64,
         dynamic_vocab: bool,
         token_count: &u64,
@@ -130,12 +126,12 @@ impl CorpusCount {
         prune_words: &Vec<bool>,
         prune_vocab_filename: &str,
         entries_per_block: i8,
-        disallowed_symbol: WarningAction,
+        disallowed_symbol: WarningAction
     ) -> Self {
         Self { token_count: 0 }
     }
 
-    fn Run(&self, position: &ChainPosition) {
+    fn Run(&self, position: &crate::builder::proba::ChainPosition) {
         todo!()
     }
 }

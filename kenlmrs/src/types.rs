@@ -151,7 +151,6 @@ impl Default for ProbBackoff {
 }
 
 /// Configuration for language model loading and operation
-#[derive(Debug, Clone)]
 pub struct Config {
     /// How to handle unknown words
     pub unknown_missing: UnknownMissing,
@@ -177,6 +176,28 @@ pub struct Config {
     pub enumerate_vocab: Option<Box<dyn EnumerateVocab>>,
     /// Warn about positive log probabilities
     pub positive_log_probability: PositiveLogProbability,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("unknown_missing", &self.unknown_missing)
+            .field("unknown_missing_logprob", &self.unknown_missing_logprob)
+            .field("probing_multiplier", &self.probing_multiplier)
+            .field("building_memory", &self.building_memory)
+            .field(
+                "temporary_directory_prefix",
+                &self.temporary_directory_prefix,
+            )
+            .field("arpa_complain", &self.arpa_complain)
+            .field("write_method", &self.write_method)
+            .field("write_mmap", &self.write_mmap)
+            .field("load_method", &self.load_method)
+            .field("messages", &self.messages.is_some())
+            .field("enumerate_vocab", &self.enumerate_vocab.is_some())
+            .field("positive_log_probability", &self.positive_log_probability)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::any::Any;
-
+use std::marker::PhantomData;
 
 pub struct Chain;
 
@@ -12,6 +12,7 @@ pub struct Block;
 
 pub struct PCQueue<T> {
     // Implementation for the producer-consumer queue
+    _phantom: PhantomData<T>,
 }
 
 pub struct MultiProgress;
@@ -43,7 +44,7 @@ impl ChainPosition {
         Self {
             in_,
             out_,
-            chain,
+            chain_: chain,
             progress_: progress.add(),
         }
     }
@@ -98,7 +99,7 @@ impl Drop for Thread {
 pub struct Recycler;
 
 impl Recycler {
-    fn run(&self, position: &ChainPosition) {
-        // Implementation to reset the blocks in the chain
+    fn run(&self, _position: &ChainPosition) {
+        // TODO: Implement block recycling logic
     }
 }

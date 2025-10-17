@@ -1,4 +1,4 @@
-use super::count::WarningAction;
+use crate::constant::WarningAction;
 
 // Add missing types
 #[derive(Debug, Clone, Default)]

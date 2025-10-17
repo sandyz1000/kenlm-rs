@@ -1,13 +1,15 @@
+use crate::model::Model;
+use std::io::Write;
 
 #[derive(Debug)]
 pub struct BenchmarkConfig;
 
 
-pub fn query_from_bytes(model: &Model, config: BenchmarkConfig, Width: i8) {
+pub fn query_from_bytes<M: Model>(model: &M, config: BenchmarkConfig, Width: i8) {
     todo!()
 }
 
-pub fn convert_to_bytes(model: &Model, fd_in: i64, width: i8) {
+pub fn convert_to_bytes<M: Model>(model: &M, fd_in: i64, width: i8) {
     todo!()
 }
 
@@ -33,7 +35,7 @@ pub fn open_read_or_throw(name: &str) -> i64 {
     todo!()
 }
 
-pub fn print_usage(out: &OStream) {
+pub fn print_usage(out: &mut dyn Write) {
     todo!()
 }
 

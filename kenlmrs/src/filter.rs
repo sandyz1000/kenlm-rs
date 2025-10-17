@@ -39,11 +39,12 @@ impl Default for Config {
 }
 
 pub(crate) fn RunThreadedFilter<FilterType, Format, OutputBuffer, F: Filter>(
-    config: &Config,
-    in_lm: &FilePiece,
-    filter_: &F,
-    output: Output,
+    _config: &Config,
+    _in_lm: &FilePiece,
+    _filter_: &F,
+    _output: Output,
 ) {
+    // TODO: Implement threaded filtering
 }
 
 #[derive(Debug, Clone)]
@@ -78,32 +79,31 @@ pub struct Multiple;
 pub struct Union;
 
 impl Union {
-    fn new(self, vocabs: &Words) -> Self {
+    fn new(self, _vocabs: &Words) -> Self {
         // TODO: Implement Union constructor
-        todo!()
+        Self
     }
 }
 
 impl Multiple {
-    fn AddNGram(
+    fn AddNGram<I>(
         &self,
-        begin: &Iterator,
-        end: &Iterator,
-        ngram: &StringPiece,
-        line: &StringPiece,
-        output: &Output,
-    ) {
+        _begin: &I,
+        _end: &I,
+        _ngram: &StringPiece,
+        _line: &StringPiece,
+        _output: &Output,
+    ) where I: Iterator {
         // TODO: Implement AddNGram
         todo!()
     }
 }
 
-pub fn ReadSingle(in_: IStream, out: &HashSet<String>) {
+pub fn ReadSingle(_in_: IStream, _out: &HashSet<String>) {
     // TODO: Implement ReadSingle
-    todo!()
 }
 
-pub fn ReadMultiple(in_: IStream, out_: Substrings) -> i64 {
+pub fn ReadMultiple(_in_: IStream, _out_: Substrings) -> i64 {
     // TODO: Implement ReadMultiple
-    todo!()
+    0
 }

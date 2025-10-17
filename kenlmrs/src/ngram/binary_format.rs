@@ -1,94 +1,41 @@
-use crate::constant::WriteMethod;
-use crate::types::ModelType;
+use crate::constant::{BINARY_MAGIC, MODEL_VERSION};
+use crate::error::LMError;
+use crate::types::{Config, ModelType};
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::mem;
-use std::os::fd::RawFd;
+use std::path::Path;
 
-// Placeholder types
-pub struct Mmap;
-pub struct LoadException;
-pub struct FormatLoadException;
-pub struct Sanity;
-pub struct Config;
-pub struct MmapOptions;
-pub struct OldSanity;
+/// Model type names for error messages
+pub const MODEL_NAMES: [&str; 6] = [
+    "probing hash table",
+    "probing hash table with rest costs",
+    "trie",
+    "quantized trie",
+    "array-compressed trie",
+    "quantized array-compressed trie",
+];
 
-// Placeholder functions
-fn read_header(_fd: RawFd, _params: &mut FixedWidthParameters) -> Result<(), LoadException> {
-    todo!()
-}
-fn match_check(
-    _model_type: ModelType,
-    _search_version: u32,
-    _params: &FixedWidthParameters,
-) -> Result<(), LoadException> {
-    todo!()
-}
-fn total_header_size(_order: u8) -> u64 {
-    todo!()
-}
-
-// Placeholder constants
-const k_bad_size: u64 = 0;
-const k_magic_incomplete: &str = "incomplete";
-const k_magic_before_version: &str = "version";
-const k_magic_version: u32 = 1;
-
-// Placeholder util module types and functions
-pub mod util {
-    use std::os::fd::RawFd;
-
-    pub enum LoadMethod {
-        Lazy,
-        Populate,
-    }
-
-    pub const k_bad_size: u64 = 0;
-
-    pub fn size_file(_fd: RawFd) -> u64 {
-        0
-    }
-    pub fn map_read(
-        _memory: &mut super::Mmap,
-        _fd: RawFd,
-        _method: LoadMethod,
-        _offset: u64,
-        _size: u64,
-    ) -> Result<(), std::io::Error> {
-        Ok(())
-    }
-    pub fn open_read_or_throw(_file: &str) -> Result<RawFd, std::io::Error> {
-        Ok(0)
-    }
-}
-
-#[derive(Debug)]
+/// Fixed-width parameters stored at the beginning of a binary file
+#[derive(Debug, Clone)]
 pub struct FixedWidthParameters {
-    order: u8,
-    probing_multiplier: f32,
-    model_type: ModelType,
-    has_vocabulary: bool,
-    search_version: u32,
+    pub order: u8,
+    pub probing_multiplier: f32,
+    pub model_type: ModelType,
+    pub has_vocabulary: bool,
+    pub search_version: u32,
 }
 
-const ALIGN8: usize = 8;
-
-#[derive(Debug)]
+/// All parameters from the binary file header
+#[derive(Debug, Clone)]
 pub struct Parameters {
-    fixed: FixedWidthParameters,
-    counts: Vec<u64>,
+    pub fixed: FixedWidthParameters,
+    pub counts: Vec<u64>,
 }
 
-#[derive(Debug)]
+/// Handles binary format reading and writing for KenLM models
 pub struct BinaryFormat {
-    write_method: WriteMethod,
-    write_mmap: Option<String>,
-    load_method: util::LoadMethod,
     file: Option<File>,
-    mapping: Option<Mmap>,
-    memory_vocab: Option<Vec<u8>>,
-    memory_search: Option<Vec<u8>>,
     header_size: usize,
     vocab_size: usize,
     vocab_pad: usize,
@@ -96,147 +43,267 @@ pub struct BinaryFormat {
 }
 
 impl BinaryFormat {
-    fn new(config: &Config) -> Self {
+    /// Create a new BinaryFormat handler
+    pub fn new() -> Self {
         Self {
-            write_method: config.write_method.clone(),
-            write_mmap: config.write_mmap.clone(),
-            load_method: config.load_method.clone(),
             file: None,
-            mapping: None,
-            memory_vocab: None,
-            memory_search: None,
-            header_size: usize::MAX,
-            vocab_size: usize::MAX,
+            header_size: 0,
+            vocab_size: 0,
             vocab_pad: 0,
             vocab_string_offset: u64::MAX,
         }
     }
 
-    fn initialize_binary(
+    /// Check if a file is in KenLM binary format
+    pub fn recognize_binary<P: AsRef<Path>>(path: P) -> Result<Option<ModelType>, LMError> {
+        let mut file = File::open(path)?;
+        let mut magic = vec![0u8; BINARY_MAGIC.len()];
+
+        match file.read_exact(&mut magic) {
+            Ok(_) => {
+                if &magic == BINARY_MAGIC.as_bytes() {
+                    // Read the model type
+                    file.seek(SeekFrom::Start(BINARY_MAGIC.len() as u64))?;
+                    let mut params = FixedWidthParameters {
+                        order: 0,
+                        probing_multiplier: 0.0,
+                        model_type: ModelType::Probing,
+                        has_vocabulary: false,
+                        search_version: 0,
+                    };
+                    Self::read_fixed_width(&mut file, &mut params)?;
+                    Ok(Some(params.model_type))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Read the fixed-width header parameters
+    fn read_fixed_width(file: &mut File, params: &mut FixedWidthParameters) -> Result<(), LMError> {
+        // Read order
+        let mut buf = [0u8; 1];
+        file.read_exact(&mut buf)?;
+        params.order = buf[0];
+
+        // Read probing multiplier
+        let mut buf = [0u8; 4];
+        file.read_exact(&mut buf)?;
+        params.probing_multiplier = f32::from_le_bytes(buf);
+
+        // Read model type
+        let mut buf = [0u8; 1];
+        file.read_exact(&mut buf)?;
+        params.model_type = match buf[0] {
+            0 => ModelType::Probing,
+            1 => ModelType::RestProbing,
+            2 => ModelType::Trie,
+            3 => ModelType::QuantTrie,
+            4 => ModelType::ArrayTrie,
+            5 => ModelType::QuantArrayTrie,
+            _ => return Err(LMError::UnsupportedModelType),
+        };
+
+        // Read has_vocabulary flag
+        let mut buf = [0u8; 1];
+        file.read_exact(&mut buf)?;
+        params.has_vocabulary = buf[0] != 0;
+
+        // Read search version
+        let mut buf = [0u8; 4];
+        file.read_exact(&mut buf)?;
+        params.search_version = u32::from_le_bytes(buf);
+
+        Ok(())
+    }
+
+    /// Initialize from a binary file
+    pub fn initialize_binary<P: AsRef<Path>>(
         &mut self,
-        fd: RawFd,
+        path: P,
         model_type: ModelType,
         search_version: u32,
-        params: &mut Parameters,
-    ) -> Result<(), LoadException> {
-        self.file = Some(unsafe { File::from_raw_fd(fd) });
-        self.write_mmap = None; // Ignore write requests; this is already in binary format.
-        read_header(fd, params)?;
-        match_check(model_type, search_version, params)?;
-        self.header_size = total_header_size(params.counts.len() as u8);
-        Ok(())
-    }
+    ) -> Result<Parameters, LMError> {
+        let mut file = File::open(path)?;
 
-    fn read_for_config(
-        &self,
-        to: &mut [u8],
-        amount: usize,
-        offset_excluding_header: u64,
-    ) -> Result<(), LoadException> {
-        assert!(self.header_size != usize::MAX);
-        let file = self.file.as_ref().ok_or(LoadException)?;
-        file.seek(SeekFrom::Start(
-            offset_excluding_header + self.header_size as u64,
-        ))?;
-        file.read_exact(to)?;
-        Ok(())
-    }
+        // Read and verify magic string
+        let mut magic = vec![0u8; BINARY_MAGIC.len()];
+        file.read_exact(&mut magic)?;
 
-    fn load_binary(&mut self, size: usize) -> Result<*mut u8, LoadException> {
-        assert!(self.header_size != usize::MAX);
-        let file = self.file.as_ref().ok_or(LoadException)?;
-        let file_size = file.metadata()?.len();
-        let total_map = self.header_size as u64 + size as u64;
-        if file_size < total_map {
-            return Err(FormatLoadException.into());
-        }
-        let mmap = unsafe {
-            MmapOptions::new()
-                .offset(0)
-                .len(total_map as usize)
-                .map(file)?
-        };
-        self.mapping = Some(mmap);
-        self.vocab_string_offset = total_map;
-        Ok(unsafe {
-            self.mapping
-                .as_mut()
-                .unwrap()
-                .as_mut_ptr()
-                .add(self.header_size)
-        })
-    }
-
-    // ... other methods
-}
-
-// Other utility functions and types
-// ...
-
-fn is_binary_format(fd: RawFd) -> bool {
-    let size = util::size_file(fd);
-    if size == util::k_bad_size || size <= mem::size_of::<Sanity>() as u64 {
-        return false;
-    }
-
-    let mut memory = Vec::with_capacity(mem::size_of::<Sanity>());
-    unsafe { memory.set_len(mem::size_of::<Sanity>()) };
-    if let Err(_) = util::map_read(
-        util::LoadMethod::Lazy,
-        fd,
-        0,
-        mem::size_of::<Sanity>(),
-        &mut memory,
-    ) {
-        return false;
-    }
-
-    let reference_header = Sanity::reference();
-    if memory == reference_header.as_bytes() {
-        return true;
-    }
-
-    if memory.starts_with(k_magic_incomplete.as_bytes()) {
-        panic!("This binary file did not finish building");
-    }
-
-    if memory.starts_with(k_magic_before_version.as_bytes()) {
-        let version_str = &memory[k_magic_before_version.len()..];
-        let version = str::from_utf8(version_str).unwrap().parse::<i32>().unwrap();
-        if version != k_magic_version {
-            panic!(
-                "Binary file has version {} but this implementation expects version {}",
-                version, k_magic_version
-            );
+        if &magic != BINARY_MAGIC.as_bytes() {
+            return Err(LMError::FormatError("Not a KenLM binary file".to_string()));
         }
 
-        let old_sanity = OldSanity::reference();
-        if memory == old_sanity.as_bytes() {
-            panic!("Looks like this is an old 32-bit format. The old 32-bit format has been removed so that 64-bit and 32-bit files are exchangeable.");
-        }
-        panic!("File looks like it should be loaded with mmap, but the test values don't match. Try rebuilding the binary format LM using the same code revision, compiler, and architecture");
-    }
-
-    false
-}
-
-fn recognize_binary(file: &str, recognized: &mut ModelType) -> bool {
-    let fd = util::open_read_or_throw(file).unwrap();
-    if !is_binary_format(fd) {
-        return false;
-    }
-
-    let mut params = Parameters {
-        fixed: FixedWidthParameters {
+        // Read fixed-width parameters
+        let mut fixed = FixedWidthParameters {
             order: 0,
             probing_multiplier: 0.0,
-            model_type: ModelType::ProbingHashTables,
+            model_type: ModelType::Probing,
             has_vocabulary: false,
             search_version: 0,
-        },
-        counts: vec![],
-    };
-    read_header(fd, &mut params).unwrap();
-    *recognized = params.fixed.model_type;
-    true
+        };
+        Self::read_fixed_width(&mut file, &mut fixed)?;
+
+        // Verify model type matches
+        if fixed.model_type != model_type {
+            return Err(LMError::FormatError(format!(
+                "Model type mismatch: expected {:?}, got {:?}",
+                model_type, fixed.model_type
+            )));
+        }
+
+        // Verify version matches
+        if fixed.search_version != search_version {
+            return Err(LMError::VersionMismatch {
+                expected: search_version,
+                actual: fixed.search_version,
+            });
+        }
+
+        // Read n-gram counts
+        let mut counts = Vec::with_capacity(fixed.order as usize);
+        for _ in 0..fixed.order {
+            let mut buf = [0u8; 8];
+            file.read_exact(&mut buf)?;
+            counts.push(u64::from_le_bytes(buf));
+        }
+
+        self.file = Some(file);
+        self.header_size = Self::calculate_header_size(fixed.order);
+
+        Ok(Parameters { fixed, counts })
+    }
+
+    /// Calculate the size of the header based on order
+    fn calculate_header_size(order: u8) -> usize {
+        // Magic string + fixed params + counts
+        BINARY_MAGIC.len()
+            + 1  // order
+            + 4  // probing_multiplier
+            + 1  // model_type
+            + 1  // has_vocabulary
+            + 4  // search_version
+            + (order as usize * 8) // counts
+    }
+
+    /// Read data from the file at a specific offset (excluding header)
+    pub fn read_for_config(
+        &self,
+        to: &mut [u8],
+        offset_excluding_header: u64,
+    ) -> Result<(), LMError> {
+        if let Some(ref file) = self.file {
+            let mut file = file;
+            let absolute_offset = self.header_size as u64 + offset_excluding_header;
+            file.seek(SeekFrom::Start(absolute_offset))?;
+            file.read_exact(to)?;
+            Ok(())
+        } else {
+            Err(LMError::LoadError("No file loaded".to_string()))
+        }
+    }
+
+    /// Get the offset where vocabulary strings begin
+    pub fn vocab_string_reading_offset(&self) -> u64 {
+        self.vocab_string_offset
+    }
+
+    /// Set the vocabulary string offset
+    pub fn set_vocab_string_offset(&mut self, offset: u64) {
+        self.vocab_string_offset = offset;
+    }
+}
+
+impl Default for BinaryFormat {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Helper module for utility functions
+pub mod util {
+    use super::*;
+
+    /// Get file size
+    pub fn file_size(file: &File) -> Result<u64, LMError> {
+        Ok(file.metadata()?.len())
+    }
+
+    /// Read integer with specific bit width
+    pub fn read_int57(base: &[u8], bit_offset: u64, bits: u8, mask: u64) -> u64 {
+        let byte_offset = (bit_offset / 8) as usize;
+        let bit_remainder = (bit_offset % 8) as u8;
+
+        if byte_offset + 8 > base.len() {
+            return 0;
+        }
+
+        // Read 8 bytes as u64
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&base[byte_offset..byte_offset + 8]);
+        let value = u64::from_le_bytes(bytes);
+
+        // Shift and mask
+        ((value >> bit_remainder) & mask)
+    }
+
+    /// Write integer with specific bit width
+    pub fn write_int57(base: &mut [u8], bit_offset: u64, bits: u8, value: u64) {
+        let byte_offset = (bit_offset / 8) as usize;
+        let bit_remainder = (bit_offset % 8) as u8;
+
+        if byte_offset + 8 > base.len() {
+            return;
+        }
+
+        // Read existing value
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&base[byte_offset..byte_offset + 8]);
+        let mut existing = u64::from_le_bytes(bytes);
+
+        // Create mask for the bits we're writing
+        let write_mask = ((1u64 << bits) - 1) << bit_remainder;
+
+        // Clear the bits and set new value
+        existing = (existing & !write_mask) | ((value << bit_remainder) & write_mask);
+
+        // Write back
+        base[byte_offset..byte_offset + 8].copy_from_slice(&existing.to_le_bytes());
+    }
+
+    /// Required bits to represent a value
+    pub fn required_bits(value: u64) -> u8 {
+        if value == 0 {
+            return 1;
+        }
+        (64 - value.leading_zeros()) as u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_required_bits() {
+        assert_eq!(util::required_bits(0), 1);
+        assert_eq!(util::required_bits(1), 1);
+        assert_eq!(util::required_bits(2), 2);
+        assert_eq!(util::required_bits(3), 2);
+        assert_eq!(util::required_bits(255), 8);
+        assert_eq!(util::required_bits(256), 9);
+    }
+
+    #[test]
+    fn test_read_write_int57() {
+        let mut buffer = vec![0u8; 16];
+
+        util::write_int57(&mut buffer, 0, 8, 0x42);
+        assert_eq!(util::read_int57(&buffer, 0, 8, 0xFF), 0x42);
+
+        util::write_int57(&mut buffer, 8, 16, 0x1234);
+        assert_eq!(util::read_int57(&buffer, 8, 16, 0xFFFF), 0x1234);
+    }
 }

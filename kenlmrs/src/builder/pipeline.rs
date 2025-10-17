@@ -1,6 +1,12 @@
 use super::config::InitialProbabilitiesConfig;
 use crate::builder::count::DiscountConfig;
+use crate::builder::proba::Discount;
+use crate::constant::WarningAction;
 use crate::stream::{config::ChainConfig, config::SortConfig};
+use crate::types::WordIndex;
+
+/// Placeholder for Output
+pub struct Output;
 
 #[derive(Debug, Default)]
 pub struct PipelineConfig {
