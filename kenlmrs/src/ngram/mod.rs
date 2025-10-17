@@ -3,6 +3,7 @@ pub mod query;
 pub mod search;
 
 use crate::constant::{ARPALoadComplain, RestFunction, WarningAction, WriteMethod};
+use crate::types::{ModelType, State, WordIndex};
 use std::cell::RefCell;
 use std::fmt::{Debug, Display};
 use std::fs::{File, FileType};
@@ -10,9 +11,6 @@ use std::io::prelude::*;
 use std::io::{BufRead, BufReader};
 
 type Node = NodeRange;
-
-#[derive(Debug, Clone, Copy)]
-pub struct State;
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadMethod;
@@ -38,7 +36,6 @@ pub struct BitPackedMiddle<Bhiksha>;
 #[derive(Debug)]
 pub struct BitPackedLongest;
 
-
 #[derive(Debug, Clone, Copy)]
 pub struct GenericModel<Search, VocabularyT> {
     // This is the model type returned by RecognizeBinary.
@@ -58,7 +55,6 @@ pub struct HashedSearch<Value>;
 #[derive(Debug, Clone, Copy)]
 pub struct TrieSearch<Quant, Bhiksha>;
 
-
 impl Value for RestValue {
     fn new() -> Self {
         todo!()
@@ -71,19 +67,21 @@ impl Value for BackoffValue {
     }
 }
 
-
 impl Config {
     // pub fn ProgressMessages() -> ostream;
 }
 
 impl State {
-    pub fn Compare(&self, other: &State);
+    pub fn Compare(&self, other: &State) {
+        // TODO: Implement state comparison
+        todo!()
+    }
 }
 
 trait VocabularyT {
     fn new() -> Self {}
 
-    pub fn Index(&self, inp_str: &StringPiece) -> WordIndex {}
+    fn Index(&self, inp_str: &StringPiece) -> WordIndex {}
 }
 
 impl VocabularyT for SortedVocabulary {

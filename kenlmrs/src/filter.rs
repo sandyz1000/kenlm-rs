@@ -1,6 +1,12 @@
 use crate::constant::{FilterMode, FormatEnum};
+use crate::utils::pieces::file::FilePiece;
+use crate::utils::pieces::string::StringPiece;
 use std::collections::HashSet;
 use std::process::Output;
+
+// Placeholder types
+pub struct Words;
+pub struct IStream;
 
 #[derive(Debug)]
 pub enum FilterType {
@@ -9,7 +15,7 @@ pub enum FilterType {
     Binary,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Config {
     batch_size: i32, // 25000
     threads: i8,
@@ -32,10 +38,10 @@ impl Default for Config {
     }
 }
 
-pub(crate) fn RunThreadedFilter<FilterType, Format, OutputBuffer>(
+pub(crate) fn RunThreadedFilter<FilterType, Format, OutputBuffer, F: Filter>(
     config: &Config,
     in_lm: &FilePiece,
-    filter_: &Filter,
+    filter_: &F,
     output: Output,
 ) {
 }
@@ -50,9 +56,17 @@ trait Filter {
     fn new() -> Self;
 }
 
-impl Filter for PhraseFilter {}
+impl Filter for PhraseFilter {
+    fn new() -> Self {
+        PhraseFilter
+    }
+}
 
-impl Filter for VocabFilter {}
+impl Filter for VocabFilter {
+    fn new() -> Self {
+        VocabFilter
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Substrings;
@@ -64,7 +78,10 @@ pub struct Multiple;
 pub struct Union;
 
 impl Union {
-    fn new(self, vocabs: &Words) -> Self;
+    fn new(self, vocabs: &Words) -> Self {
+        // TODO: Implement Union constructor
+        todo!()
+    }
 }
 
 impl Multiple {
@@ -75,8 +92,18 @@ impl Multiple {
         ngram: &StringPiece,
         line: &StringPiece,
         output: &Output,
-    );
+    ) {
+        // TODO: Implement AddNGram
+        todo!()
+    }
 }
 
-pub fn ReadSingle(in_: IStream, out: &HashSet<String>);
-pub fn ReadMultiple(in_: IStream, out_: Substrings) -> i64;
+pub fn ReadSingle(in_: IStream, out: &HashSet<String>) {
+    // TODO: Implement ReadSingle
+    todo!()
+}
+
+pub fn ReadMultiple(in_: IStream, out_: Substrings) -> i64 {
+    // TODO: Implement ReadMultiple
+    todo!()
+}

@@ -1,8 +1,6 @@
-use crate::stream::{config::SortConfig, config::ChainConfig};
-use builder::count::DiscountConfig;
 use super::config::InitialProbabilitiesConfig;
-
-
+use crate::builder::count::DiscountConfig;
+use crate::stream::{config::ChainConfig, config::SortConfig};
 
 #[derive(Debug, Default)]
 pub struct PipelineConfig {
@@ -21,7 +19,7 @@ pub struct PipelineConfig {
     block_count: i8,
 
     // n-gram count thresholds for pruning. 0 values means no pruning for corresponding n-gram order
-    prune_thresholds: Vec<i64>,  // mjd
+    prune_thresholds: Vec<i64>, // mjd
     prune_vocab: bool,
     prune_vocab_file: String,
 
@@ -43,31 +41,38 @@ pub struct PipelineConfig {
     // * a particular size by replicating <unk> multiple times for purposes of
     // * computing vocabulary size.  It has no effect if the actual vocabulary is
     // * larger.  This parameter serves the same purpose as IRSTLM's "dub".
-
     vocab_size_for_unk: u64,
 
     // What to do the first time <s>, </s>, or <unk> appears in the input. If this is
     // anything but THROW_UP, then the symbol will always be treated as whitespace.
     disallowed_symbol_action: WarningAction,
-
 }
 
 impl PipelineConfig {
     fn new() -> Self {
         todo!()
     }
-    
+
     pub fn TempPrefix(self) -> String {
         todo!()
     }
-    
+
     pub fn TotalMemory() -> i8 {
         todo!()
     }
 }
 
-pub fn Pipeline(config: &PipelineConfig, text_file: i64, output: &Output);
+pub fn Pipeline(config: &PipelineConfig, text_file: i64, output: &Output) {
+    // TODO: Implement pipeline processing
+    todo!()
+}
 
-pub fn ParseDiscountFallback(param: &Vec<String>) -> Discount;
+pub fn ParseDiscountFallback(param: &Vec<String>) -> Discount {
+    // TODO: Implement discount fallback parsing
+    todo!()
+}
 
-pub fn ParsePruning(param: &Vec<String>, order: i8) -> Vec<u64>;
+pub fn ParsePruning(param: &Vec<String>, order: i8) -> Vec<u64> {
+    // TODO: Implement pruning parameter parsing
+    todo!()
+}

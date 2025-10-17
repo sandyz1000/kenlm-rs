@@ -1,11 +1,9 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
-use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
 
-use super::error::Error;
-
+use crate::error::LMError as Error;
 
 // Define the LineIterator struct
 pub struct LineIterator<'a> {
@@ -55,11 +53,11 @@ impl FilePiece {
     pub fn offset(&self) -> usize {
         self.offset
     }
-    
+
     pub fn get(&self) -> char {
         self.data.chars().nth(self.offset).unwrap()
     }
-    
+
     fn begin(&self) -> LineIterator {
         LineIterator::new(self, '\n')
     }
@@ -90,7 +88,7 @@ impl FilePiece {
         result
     }
 
-    fn read_line(&self, delim: char, strip_cr: bool) -> io::Result<String> {
+    pub fn read_line(&self, delim: char, strip_cr: bool) -> io::Result<String> {
         let mut reader = BufReader::new(&self.file);
         let mut buffer = String::new();
         reader.read_line(&mut buffer)?;
@@ -116,7 +114,10 @@ impl FilePiece {
 
     fn read_number<T: FromStr>(&self) -> Result<T, Error> {
         // ParseNumberException
-        let line = self.read_line('\n', true).map_err(|e| Error::ParseNumberException(e.to_string()))?;
-        line.parse::<T>().map_err(|_| Error::ParseNumberException(line))
+        let line = self
+            .read_line('\n', true)
+            .map_err(|e| Error::ParseNumberException(e.to_string()))?;
+        line.parse::<T>()
+            .map_err(|_| Error::ParseNumberException(line))
     }
 }

@@ -2,25 +2,18 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::mem::{size_of, MaybeUninit};
 use std::ptr::{null_mut, write};
 
-use crate::utils::file::FilePiece;
+use crate::types::{ModelType, WordIndex};
+use crate::utils::pieces::file::FilePiece;
 
-type WordIndex = u32;
-type ProbBackoff = f32;
 type Config = ();
 
 struct SortedVocabulary;
 struct SortedFiles;
-struct UnigramPointer;
 struct MiddlePointer;
 struct LongestPointer;
-struct NodeRange;
 
 const TRIE_SORTED: u8 = 0;
 const MODEL_TYPE: u8 = 1;
-
-enum ModelType {
-    TrieSorted = TRIE_SORTED as isize,
-}
 
 pub struct TrieSearch<Quant, Bhiksha> {
     middle_begin_: *mut Middle,
@@ -32,7 +25,7 @@ pub struct TrieSearch<Quant, Bhiksha> {
 
 impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
     pub const kDifferentRest: bool = false;
-    pub const kModelType: ModelType = ModelType::TrieSorted;
+    pub const kModelType: ModelType = ModelType::Trie;
     pub const kVersion: u8 = 1;
 
     pub fn new() -> Self {
@@ -45,19 +38,38 @@ impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
         }
     }
 
-    pub fn update_config_from_binary(file: &BinaryFormat, counts: &Vec<u64>, offset: u64, config: &mut Config) {
+    pub fn update_config_from_binary(
+        file: &BinaryFormat,
+        counts: &Vec<u64>,
+        offset: u64,
+        config: &mut Config,
+    ) {
         Quant::update_config_from_binary(file, offset, config);
         if counts.len() > 2 {
-            Bhiksha::update_config_from_binary(file, offset + Quant::size(counts.len(), config) + Unigram::size(counts[0]), config);
+            Bhiksha::update_config_from_binary(
+                file,
+                offset + Quant::size(counts.len(), config) + Unigram::size(counts[0]),
+                config,
+            );
         }
     }
 
     pub fn size(counts: &Vec<u64>, config: &Config) -> u64 {
         let mut ret = Quant::size(counts.len(), config) + Unigram::size(counts[0]);
         for i in 1..counts.len() - 1 {
-            ret += Middle::size(Quant::middle_bits(config), counts[i], counts[0], counts[i + 1], config);
+            ret += Middle::size(
+                Quant::middle_bits(config),
+                counts[i],
+                counts[0],
+                counts[i + 1],
+                config,
+            );
         }
-        ret + Longest::size(Quant::longest_bits(config), counts[counts.len() - 1], counts[0])
+        ret + Longest::size(
+            Quant::longest_bits(config),
+            counts[counts.len() - 1],
+            counts[0],
+        )
     }
 
     pub fn setup_memory(&mut self, start: *mut u8, counts: &Vec<u64>, config: &Config) -> *mut u8 {
@@ -65,7 +77,15 @@ impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
         unimplemented!()
     }
 
-    pub fn initialize_from_arpa(&mut self, file: &str, f: &mut FilePiece, counts: &mut Vec<u64>, config: &Config, vocab: &mut SortedVocabulary, backing: &mut BinaryFormat) {
+    pub fn initialize_from_arpa(
+        &mut self,
+        file: &str,
+        f: &mut FilePiece,
+        counts: &mut Vec<u64>,
+        config: &Config,
+        vocab: &mut SortedVocabulary,
+        backing: &mut BinaryFormat,
+    ) {
         // Implementation for initializing from ARPA file
         unimplemented!()
     }
@@ -78,19 +98,41 @@ impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
         &mut self.unigram_.unknown()
     }
 
-    pub fn lookup_unigram(&self, word: WordIndex, next: &mut NodeRange, independent_left: &mut bool, extend_left: &mut u64) -> UnigramPointer {
+    pub fn lookup_unigram(
+        &self,
+        word: WordIndex,
+        next: &mut NodeRange,
+        independent_left: &mut bool,
+        extend_left: &mut u64,
+    ) -> UnigramPointer {
         *extend_left = word as u64;
         let ret = self.unigram_.find(word, next);
         *independent_left = next.begin == next.end;
         ret
     }
 
-    pub fn unpack(&self, extend_pointer: u64, extend_length: u8, node: &mut NodeRange) -> MiddlePointer {
-        MiddlePointer::new(&self.quant_, extend_length - 2, unsafe { (*self.middle_begin_.add((extend_length - 2) as usize)).read_entry(extend_pointer, node) })
+    pub fn unpack(
+        &self,
+        extend_pointer: u64,
+        extend_length: u8,
+        node: &mut NodeRange,
+    ) -> MiddlePointer {
+        MiddlePointer::new(&self.quant_, extend_length - 2, unsafe {
+            (*self.middle_begin_.add((extend_length - 2) as usize)).read_entry(extend_pointer, node)
+        })
     }
 
-    pub fn lookup_middle(&self, order_minus_2: u8, word: WordIndex, node: &mut NodeRange, independent_left: &mut bool, extend_left: &mut u64) -> MiddlePointer {
-        let address = unsafe { (*self.middle_begin_.add(order_minus_2 as usize)).find(word, node, extend_left) };
+    pub fn lookup_middle(
+        &self,
+        order_minus_2: u8,
+        word: WordIndex,
+        node: &mut NodeRange,
+        independent_left: &mut bool,
+        extend_left: &mut u64,
+    ) -> MiddlePointer {
+        let address = unsafe {
+            (*self.middle_begin_.add(order_minus_2 as usize)).find(word, node, extend_left)
+        };
         *independent_left = address.base.is_null() || node.begin == node.end;
         MiddlePointer::new(&self.quant_, order_minus_2, address)
     }
@@ -99,13 +141,28 @@ impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
         LongestPointer::new(&self.quant_, self.longest_.find(word, node))
     }
 
-    pub fn fast_make_node(&self, begin: &[WordIndex], end: &[WordIndex], node: &mut NodeRange) -> bool {
+    pub fn fast_make_node(
+        &self,
+        begin: &[WordIndex],
+        end: &[WordIndex],
+        node: &mut NodeRange,
+    ) -> bool {
         assert!(!begin.is_empty());
         let mut independent_left = false;
         let mut ignored = 0;
         self.lookup_unigram(begin[0], node, &mut independent_left, &mut ignored);
         for i in begin.iter().skip(1).take(end.len()) {
-            if independent_left || !self.lookup_middle(i.wrapping_sub(begin.as_ptr() as usize) - 1, *i, node, &mut independent_left, &mut ignored).found() {
+            if independent_left
+                || !self
+                    .lookup_middle(
+                        i.wrapping_sub(begin.as_ptr() as usize) - 1,
+                        *i,
+                        node,
+                        &mut independent_left,
+                        &mut ignored,
+                    )
+                    .found()
+            {
                 return false;
             }
         }
@@ -117,7 +174,13 @@ impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
             for i in 0..self.middle_end_.wrapping_offset_from(self.middle_begin_) {
                 (*self.middle_begin_.add(i as usize)).drop_in_place();
             }
-            dealloc(self.middle_begin_ as *mut u8, Layout::array::<Middle>(self.middle_end_.wrapping_offset_from(self.middle_begin_) as usize).unwrap());
+            dealloc(
+                self.middle_begin_ as *mut u8,
+                Layout::array::<Middle>(
+                    self.middle_end_.wrapping_offset_from(self.middle_begin_) as usize
+                )
+                .unwrap(),
+            );
         }
     }
 }
@@ -138,32 +201,16 @@ mod util {
     }
 }
 
-pub struct Unigram;
-impl Unigram {
-    pub fn new() -> Self {
-        Unigram
-    }
-
-    pub fn unknown(&mut self) -> &mut ProbBackoff {
-        // Placeholder implementation
-        unimplemented!()
-    }
-
-    pub fn find(&self, word: WordIndex, next: &mut NodeRange) -> UnigramPointer {
-        // Placeholder implementation
-        unimplemented!()
-    }
-
-    pub fn size(count: u64) -> u64 {
-        // Placeholder implementation
-        unimplemented!()
-    }
-}
-
 pub struct Middle;
 
 impl Middle {
-    pub fn size(middle_bits: u8, count: u64, base_count: u64, next_count: u64, config: &Config) -> u64 {
+    pub fn size(
+        middle_bits: u8,
+        count: u64,
+        base_count: u64,
+        next_count: u64,
+        config: &Config,
+    ) -> u64 {
         // Placeholder implementation
         unimplemented!()
     }
@@ -196,7 +243,6 @@ impl Longest {
     }
 }
 
-
 impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
     pub fn middle_bits(config: &Config) -> u8 {
         // Placeholder implementation
@@ -208,7 +254,6 @@ impl<Quant, Bhiksha> TrieSearch<Quant, Bhiksha> {
         unimplemented!()
     }
 }
-
 
 #[derive(Default, Clone, Copy)]
 struct NodeRange {
@@ -369,7 +414,13 @@ impl<Bhiksha> BitPackedMiddle<Bhiksha> {
         }
     }
 
-    pub fn size(quant_bits: u8, entries: u64, max_vocab: u64, max_next: u64, config: &Config) -> u64 {
+    pub fn size(
+        quant_bits: u8,
+        entries: u64,
+        max_vocab: u64,
+        max_next: u64,
+        config: &Config,
+    ) -> u64 {
         BitPacked::base_size(entries, max_vocab, quant_bits)
     }
 

@@ -175,7 +175,7 @@ where
     }
 }
 
-fn trim(mut str: &str, spaces: &[bool; 256]) -> &str {
+fn trim<'a>(mut str: &'a str, spaces: &[bool; 256]) -> &'a str {
     while !str.is_empty() && spaces[str.as_bytes()[0] as usize] {
         str = &str[1..];
     }

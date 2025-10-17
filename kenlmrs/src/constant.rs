@@ -1,3 +1,15 @@
+/// Maximum order supported by KenLM
+pub const KENLM_MAX_ORDER: usize = 6;
+
+/// Special word indices
+pub const UNK_WORD: u32 = 0;
+pub const BOS_WORD: u32 = 1;
+pub const EOS_WORD: u32 = 2;
+
+/// Default values
+pub const DEFAULT_UNKNOWN_PROB: f32 = -100.0;
+pub const DEFAULT_PROBING_MULTIPLIER: f32 = 1.5;
+
 #[derive(Debug, Clone)]
 pub enum ARPALoadComplain {
     All,
@@ -32,19 +44,6 @@ pub enum WarningAction {
     ThrowUp,
     Complain,
     Silent,
-}
-
-// ------------------
-// Constant PYX below
-// ------------------
-#[derive(Debug)]
-pub enum ModelType {
-    Probing,
-    RestProbing,
-    Trie,
-    QuantTrie,
-    ArrayTrie,
-    QuantArrayTrie,
 }
 
 #[derive(Debug)]

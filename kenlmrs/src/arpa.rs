@@ -1,24 +1,7 @@
+use crate::utils::pieces::file::FilePiece;
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::str::FromStr;
-
-fn read_arpa_counts(in_file: &mut FilePiece, number: &mut Vec<u64>) {
-    // Implementation for reading ARPA counts
-}
-
-fn read_ngram_header(in_file: &mut FilePiece, length: u32) {
-    // Implementation for reading NGram header
-}
-
-fn read_backoff(in_file: &mut FilePiece, weights: &mut f32) {
-    *weights = in_file.read_float();
-}
-
-fn read_end(in_file: &mut FilePiece) {
-    // Implementation for reading end
-}
-
-const K_ARPA_SPACES: [bool; 256] = [false; 256];
 
 pub enum WarningAction {
     ThrowUp,
@@ -161,9 +144,9 @@ fn read_count(from: &str) -> u64 {
 
 pub fn read_arpa_counts(in_file: &mut FilePiece, number: &mut Vec<u64>) {
     number.clear();
-    let mut line = in_file.read_line();
+    let mut line = in_file.read_line('\n', true).unwrap_or_default();
     while is_entirely_whitespace(&line) || line.starts_with('#') {
-        line = in_file.read_line();
+        line = in_file.read_line('\n', true).unwrap_or_default();
     }
 
     if line != "\\data\\" {
@@ -202,14 +185,14 @@ pub fn read_arpa_counts(in_file: &mut FilePiece, number: &mut Vec<u64>) {
         }
         let count_str = remaining.split('=').nth(1).unwrap();
         number.push(read_count(count_str));
-        line = in_file.read_line();
+        line = in_file.read_line('\n', true).unwrap_or_default();
     }
 }
 
 fn read_ngram_header(in_file: &mut FilePiece, length: u32) {
-    let mut line = in_file.read_line();
+    let mut line = in_file.read_line('\n', true).unwrap_or_default();
     while is_entirely_whitespace(&line) {
-        line = in_file.read_line();
+        line = in_file.read_line('\n', true).unwrap_or_default();
     }
     let expected = format!("\\{}-grams:", length);
     if line != expected {
@@ -264,14 +247,14 @@ fn read_backoff_float(in_file: &mut FilePiece, backoff: &mut f32) {
 }
 
 fn read_end(in_file: &mut FilePiece) {
-    let mut line = in_file.read_line();
+    let mut line = in_file.read_line('\n', true).unwrap_or_default();
     while is_entirely_whitespace(&line) {
-        line = in_file.read_line();
+        line = in_file.read_line('\n', true).unwrap_or_default();
     }
     if line != "\\end\\" {
         panic!("Expected \\end\\ but the ARPA file has {}", line);
     }
-    while let Ok(line) = in_file.read_line() {
+    while let Ok(line) = in_file.read_line('\n', true) {
         if !is_entirely_whitespace(&line) {
             panic!("Trailing line {}", line);
         }
@@ -284,13 +267,13 @@ impl PositiveProbWarn {
             WarningAction::ThrowUp => {
                 let err_msg = "Positive log probability {} in the model. 
                     This is a bug in IRSTLM; you can set config.positive_log_probability = SILENT or 
-                    pass -i to build_binary to substitute 0.0 for the log probability."; 
-                panic!(err_msg, prob)
-            },
+                    pass -i to build_binary to substitute 0.0 for the log probability.";
+                panic!("{}", err_msg)
+            }
             WarningAction::Complain => {
                 let err_msg = "There's a positive log probability {} in the ARPA file, probably because of a bug in IRSTLM. This and subsequent entries will be mapped to 0 log probability.";
-                eprintln!(err_msg, prob)
-            },
+                eprintln!("{}", err_msg)
+            }
             WarningAction::Silent => (),
         }
     }

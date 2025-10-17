@@ -1,4 +1,5 @@
-use std::io::{self, Write};
+use crate::types::{FullScoreReturn, State, WordIndex};
+use std::io::{self, BufRead, BufReader, Write};
 
 #[derive(Debug)]
 pub struct QueryPrinter {
@@ -19,7 +20,9 @@ impl QueryPrinter {
             flush,
         }
     }
+}
 
+impl PrinterTrait for QueryPrinter {
     fn word(&mut self, surface: &str, vocab: usize, ret: &FullScoreReturn) {
         if !self.print_word {
             return;
@@ -45,7 +48,13 @@ impl QueryPrinter {
         }
     }
 
-    fn summary(&mut self, ppl_including_oov: f64, ppl_excluding_oov: f64, corpus_oov: u64, corpus_tokens: u64) {
+    fn summary(
+        &mut self,
+        ppl_including_oov: f64,
+        ppl_excluding_oov: f64,
+        corpus_oov: u64,
+        corpus_tokens: u64,
+    ) {
         if !self.print_summary {
             return;
         }
@@ -60,38 +69,25 @@ impl QueryPrinter {
 }
 
 #[derive(Debug)]
-pub struct FullScoreReturn {
-    ngram_length: u32,
-    prob: f32,
-}
-
-
-#[derive(Debug)]
 struct Model;
 
-impl Model {
+impl ModelTrait for Model {
     fn begin_sentence_state(&self) -> State {
-        State
+        State::new()
     }
 
     fn null_context_state(&self) -> State {
-        State
+        State::new()
     }
 
     fn full_score(&self, _state: State, _vocab: WordIndex, _out: &mut State) -> FullScoreReturn {
-        FullScoreReturn {
-            ngram_length: 0,
-            prob: 0.0,
-        }
+        FullScoreReturn::new()
     }
 
     fn get_vocabulary(&self) -> Vocabulary {
         Vocabulary
     }
 }
-
-#[derive(Debug)]
-pub struct State;
 
 #[derive(Debug)]
 pub struct Vocabulary;
@@ -110,15 +106,13 @@ impl Vocabulary {
     }
 }
 
-type WordIndex = usize;
-
 fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, printer: &mut P) {
     let mut state = if sentence_context {
         model.begin_sentence_state()
     } else {
         model.null_context_state()
     };
-    let mut out = State;
+    let mut out = State::new();
     let mut ret;
     let mut word = String::new();
 
@@ -164,7 +158,8 @@ fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, prin
 
     printer.summary(
         10.0_f64.powf(-(corpus_total / corpus_tokens as f64)),
-        10.0_f64.powf(-((corpus_total - corpus_total_oov_only) / (corpus_tokens - corpus_oov) as f64)),
+        10.0_f64
+            .powf(-((corpus_total - corpus_total_oov_only) / (corpus_tokens - corpus_oov) as f64)),
         corpus_oov,
         corpus_tokens,
     );
@@ -180,5 +175,11 @@ pub trait ModelTrait {
 pub trait PrinterTrait {
     fn word(&mut self, surface: &str, vocab: usize, ret: &FullScoreReturn);
     fn line(&mut self, oov: u64, total: f32);
-    fn summary(&mut self, ppl_including_oov: f64, ppl_excluding_oov: f64, corpus_oov: u64, corpus_tokens: u64);
+    fn summary(
+        &mut self,
+        ppl_including_oov: f64,
+        ppl_excluding_oov: f64,
+        corpus_oov: u64,
+        corpus_tokens: u64,
+    );
 }

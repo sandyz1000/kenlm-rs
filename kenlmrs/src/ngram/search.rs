@@ -1,8 +1,17 @@
+use crate::ngram::binary_format::BinaryFormat;
+use crate::types::WordIndex;
+use crate::utils::pieces::file::FilePiece;
 
-
+// Placeholder types
+pub struct Node;
+pub struct LongestPointer;
+pub struct Config;
+pub struct SortedVocabulary;
+pub struct UnigramPointer;
+pub struct ProbBackoff;
+pub struct MiddlePointer;
 
 pub trait Search {
-
     fn fast_make_node(&self, begin: WordIndex, end: WordIndex, node: &Node) -> bool;
     fn lookup_longest(&self, word: WordIndex, node: &Node) -> LongestPointer;
     fn order(&self) -> &str;

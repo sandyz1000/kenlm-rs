@@ -1,13 +1,23 @@
-use crate::kenlm::{Error, ModelBuffer, Result, StringPiece};
-use crate::util::FixedArray;
+// TODO: Add proper imports when these modules exist
+// use crate::kenlm::{Error, ModelBuffer, Result, StringPiece};
+// use crate::util::FixedArray;
 
-use core::option::Option;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+// Placeholder types
+#[derive(Debug, Clone, Copy)]
+pub struct SortConfig;
+#[derive(Debug, Clone, Copy)]
+pub struct Chain;
+#[derive(Debug, Clone, Copy)]
+pub struct ChainPosition;
+#[derive(Debug, Clone, Copy)]
+pub struct StringPiece;
+#[derive(Debug, Clone)]
+pub struct FixedArray<T>(std::marker::PhantomData<T>);
+#[derive(Debug, Clone, Copy)]
+pub struct ModelBuffer;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SplitWorker;
-
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config {

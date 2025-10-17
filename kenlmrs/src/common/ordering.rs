@@ -1,11 +1,9 @@
-use std::slice;
+use crate::types::WordIndex;
 use std::cmp::Ordering;
-use std::mem::size_of;
 use std::marker::PhantomData;
 use std::mem;
-
-
-type WordIndex = u32;
+use std::mem::size_of;
+use std::slice;
 
 pub trait Comparator {
     fn order(&self) -> usize;
@@ -96,7 +94,6 @@ impl SuffixLexicographicLess {
     }
 }
 
-
 #[derive(Debug, Clone, Copy)]
 pub struct BuildingPayload {
     count: u64,
@@ -172,11 +169,15 @@ where
     Cb: Callback,
     Cmp: Compare,
 {
-    let mut streams_with_dummy: Vec<ProxyStream<NGramHeader>> = Vec::with_capacity(positions.size() + 1);
+    let mut streams_with_dummy: Vec<ProxyStream<NGramHeader>> =
+        Vec::with_capacity(positions.size() + 1);
     streams_with_dummy.push(ProxyStream::new(None, NGramHeader::new(None, 0)));
 
     for i in 0..positions.size() {
-        streams_with_dummy.push(ProxyStream::new(Some(positions.get(i)), NGramHeader::new(None, i + 1)));
+        streams_with_dummy.push(ProxyStream::new(
+            Some(positions.get(i)),
+            NGramHeader::new(None, i + 1),
+        ));
     }
 
     let streams: &mut [ProxyStream<NGramHeader>] = &mut streams_with_dummy[1..];
@@ -190,7 +191,9 @@ where
 
     let mut current = 0;
     loop {
-        if current > 0 && streams[current - 1].begin() == &streams[current].begin()[Cmp::K_MATCH_OFFSET..] {
+        if current > 0
+            && streams[current - 1].begin() == &streams[current].begin()[Cmp::K_MATCH_OFFSET..]
+        {
             callback.enter(current, streams[current].get());
             if current + 1 < order {
                 current += 1;
@@ -221,35 +224,35 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*; 
-    
+    use super::*;
+
     #[test]
     fn test_ordering() {
         // Example usage
         let positions = ChainPositions {
             positions: vec![b"data1", b"data2"],
         };
-    
+
         struct MyCallback;
         impl Callback for MyCallback {
             fn enter(&mut self, _current: usize, _header: &NGramHeader) {
                 // Implement logic for entering callback
             }
-    
+
             fn exit(&mut self, _current: usize, _header: &NGramHeader) {
                 // Implement logic for exiting callback
             }
         }
-    
+
         struct MyCompare;
         impl Compare for MyCompare {
             const K_MATCH_OFFSET: usize = 0;
-    
+
             fn compare(a: &[u8], b: &[u8]) -> Ordering {
                 a.cmp(b)
             }
         }
-    
+
         let mut callback = MyCallback;
         joint_order::<_, MyCompare>(&positions, &mut callback);
     }

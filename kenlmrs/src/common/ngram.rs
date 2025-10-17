@@ -1,4 +1,5 @@
-
+use crate::types::WordIndex;
+use std::mem::size_of;
 
 #[derive(Debug, Clone)]
 pub struct NGramHeader<'a> {
@@ -86,7 +87,7 @@ impl<'a, Payload> NGram<'a, Payload> {
         }
     }
 
-    fn next_in_memory(&mut self) {
+    pub fn next_in_memory(&mut self) {
         let value_size = size_of::<Payload>();
         unsafe {
             let next_base = (self.header.end as *mut u8).add(value_size);
@@ -94,25 +95,25 @@ impl<'a, Payload> NGram<'a, Payload> {
         }
     }
 
-    fn total_size(order: usize) -> usize {
+    pub fn total_size(order: usize) -> usize {
         order * size_of::<WordIndex>() + size_of::<Payload>()
     }
 
-    fn total_size_instance(&self) -> usize {
+    pub fn total_size_instance(&self) -> usize {
         Self::total_size(self.header.order())
     }
 
-    fn order_from_size(size: usize) -> usize {
+    pub fn order_from_size(size: usize) -> usize {
         let ret = (size - size_of::<Payload>()) / size_of::<WordIndex>();
         assert!(size == Self::total_size(ret));
         ret
     }
 
-    fn value(&self) -> &Payload {
+    pub fn value(&self) -> &Payload {
         unsafe { &*(self.header.end() as *const Payload) }
     }
 
-    fn value_mut(&mut self) -> &mut Payload {
+    pub fn value_mut(&mut self) -> &mut Payload {
         unsafe { &mut *(self.header.end_mut() as *mut Payload) }
     }
 }

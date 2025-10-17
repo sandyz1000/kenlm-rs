@@ -1,15 +1,15 @@
+mod config;
 mod count;
 mod error;
-mod config;
-mod proba; 
 mod interpolate;
 mod pipeline;
+mod proba;
 
-use crate::kenlm::WordIndex;
 use crate::constant::WarningAction;
-use crate::util::{Chains, FilePiece, SortConfig, ChainConfig, ChainPosition, StringPiece};
+use crate::types::{ProbBackoff, WordIndex};
+// TODO: Add proper imports for util types when they exist
+// use crate::util::{Chains, FilePiece, SortConfig, ChainConfig, ChainPosition, StringPiece};
 use std::cmp;
-
 
 #[derive(Debug, Default, Clone)]
 pub struct Discount {
@@ -17,7 +17,6 @@ pub struct Discount {
 }
 
 impl Discount {
-
     fn get(&self, count: u64) -> u64 {
         self.amount[cmp::min(count as usize, 3)]
     }
@@ -27,18 +26,20 @@ impl Discount {
     }
 }
 
-
 #[derive(Debug)]
 pub struct HeaderInfo {
-    input_file: &str,
+    input_file: String,
     token_count: u64,
-    counts_pruned: Vec<u64>
-    
+    counts_pruned: Vec<u64>,
 }
 
 impl HeaderInfo {
     fn new(input_file_in: &str, token_count_in: u64, counts_pruned_in: &Vec<u64>) -> Self {
-        HeaderInfo { input_file: input_file_in, token_count: token_count_in, counts_pruned: counts_pruned_in }
+        HeaderInfo {
+            input_file: input_file_in,
+            token_count: token_count_in,
+            counts_pruned: counts_pruned_in,
+        }
     }
 }
 
@@ -97,18 +98,15 @@ impl BuildingPayload {
             self.unmarked_count()
         }
     }
-
 }
 
 // Assuming ProbBackoff and WordIndex are defined somewhere else.
 const BOS: WordIndex = 1;
 const EOS: WordIndex = 2;
 
-
-
 #[derive(Debug, Clone)]
 pub struct CorpusCount {
-    token_count: i64
+    token_count: i64,
 }
 
 impl CorpusCount {
@@ -132,7 +130,7 @@ impl CorpusCount {
         prune_words: &Vec<bool>,
         prune_vocab_filename: &str,
         entries_per_block: i8,
-        disallowed_symbol: WarningAction
+        disallowed_symbol: WarningAction,
     ) -> Self {
         Self { token_count: 0 }
     }

@@ -1,8 +1,13 @@
-use std::{convert::TryInto, fs::File};
-use crate::common::NGram;
+use crate::common::ngram::NGram;
+use crate::common::ordering::{BuildingPayload, SuffixOrder};
+use crate::types::WordIndex;
+use std::{fs::File, slice};
 
-use super::Discount;
-
+// Add missing types
+#[derive(Clone, Debug)]
+pub struct Discount {
+    pub amount: [f32; 4],
+}
 
 const KBOS: usize = 0;
 
@@ -80,10 +85,10 @@ impl<'a> StatCollector<'a> {
             let s = &self.orders[i];
             for j in 1..4 {
                 let message = format!("BadDiscountException: Could not calculate Kneser-Ney discounts for {}-grams with adjusted count {} because we didn't observe any {}-grams with adjusted count {}; Is this small or artificial data?", i + 1, j + 1, i + 1, j);
-                assert!(s.n[j] != 0, message);
+                assert!(s.n[j] != 0, "{}", message);
             }
 
-            let y = s.n[1] as f32 / (s.n[1] + 2.0 * s.n[2]) as f32;
+            let y = s.n[1] as f32 / (s.n[1] as f32 + 2.0 * s.n[2] as f32);
             for j in 1..4 {
                 self.discounts[i].amount[j] =
                     j as f32 - (j + 1) as f32 * y * s.n[j + 1] as f32 / s.n[j] as f32;
@@ -113,8 +118,6 @@ impl<'a> StatCollector<'a> {
         }
     }
 }
-
-
 
 struct CorpusCount<'a> {
     from: &'a mut File,
@@ -180,13 +183,10 @@ impl<'a> CorpusCount<'a> {
     }
 }
 
-// Placeholder types for WordIndex and ChainPosition
-pub type WordIndex = usize;
-
+// Placeholder types for ChainPosition
 struct ChainPosition {
     // Fields for ChainPosition
 }
-
 
 #[derive(Debug, Clone)]
 pub struct CombineCounts;
@@ -194,16 +194,26 @@ pub struct CombineCounts;
 impl CombineCounts {
     fn combine(&self, first_void: *mut u8, second_void: *const u8, compare: &SuffixOrder) -> bool {
         let order = compare.order();
-        let first_data = unsafe { slice::from_raw_parts_mut(first_void, order * size_of::<WordIndex>() + size_of::<BuildingPayload>()) };
-        let second_data = unsafe { slice::from_raw_parts(second_void, order * size_of::<WordIndex>() + size_of::<BuildingPayload>()) };
-        
+        let first_data = unsafe {
+            slice::from_raw_parts_mut(
+                first_void,
+                order * size_of::<WordIndex>() + size_of::<BuildingPayload>(),
+            )
+        };
+        let second_data = unsafe {
+            slice::from_raw_parts(
+                second_void,
+                order * size_of::<WordIndex>() + size_of::<BuildingPayload>(),
+            )
+        };
+
         let mut first = NGram::new(first_data, order);
         let second = NGram::new(second_data, order);
 
         if first.begin() != second.begin() {
             return false;
         }
-        
+
         first.value_mut().count += second.value().count;
         true
     }

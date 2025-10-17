@@ -1,3 +1,4 @@
+use crate::types::ModelType;
 use std::cmp::Ordering;
 
 const KENLM_MAX_ORDER: usize = 6; // Assuming a value for KENLM_MAX_ORDER
@@ -7,7 +8,7 @@ const K_NO_EXTENSION_QUANT: u64 = 0; // Assuming a value for kNoExtensionQuant
 struct DontQuantize;
 
 impl DontQuantize {
-    const MODEL_TYPE_ADD: ModelType = ModelType::QuantAdd;
+    const MODEL_TYPE_ADD: u8 = 3; // ModelType::QuantTrie as u8 - ModelType::Trie as u8
 
     fn update_config_from_binary(_file: &BinaryFormat, _offset: u64, _config: &mut Config) {
         // No implementation needed
@@ -42,11 +43,11 @@ impl DontQuantize {
     }
 }
 
-struct MiddlePointer {
+struct DontQuantizeMiddlePointer {
     address: BitAddress,
 }
 
-impl MiddlePointer {
+impl DontQuantizeMiddlePointer {
     fn new(_quant: &DontQuantize, _order_minus_2: u8, address: BitAddress) -> Self {
         Self { address }
     }
@@ -69,15 +70,19 @@ impl MiddlePointer {
 
     fn write(&self, prob: f32, backoff: f32) {
         write_non_positive_float31(&mut self.address.base.to_vec(), self.address.offset, prob);
-        write_float32(&mut self.address.base.to_vec(), self.address.offset + 31, backoff);
+        write_float32(
+            &mut self.address.base.to_vec(),
+            self.address.offset + 31,
+            backoff,
+        );
     }
 }
 
-pub struct LongestPointer {
+pub struct DontQuantizeLongestPointer {
     address: BitAddress,
 }
 
-impl LongestPointer {
+impl DontQuantizeLongestPointer {
     fn new(_quant: &DontQuantize, address: BitAddress) -> Self {
         Self { address }
     }
@@ -118,17 +123,11 @@ fn write_float32(base: &mut Vec<u8>, offset: usize, value: f32) {
     // Implement this function based on your requirements
 }
 
-enum ModelType {
-    QuantAdd,
-    // Add other variants as needed
-}
-
 struct Config {
     prob_bits: u8,
     backoff_bits: u8,
     // Add other fields as needed
 }
-
 
 #[derive(Clone)]
 struct Bins {
@@ -138,29 +137,50 @@ struct Bins {
 }
 
 pub trait Quant {
-    pub fn new() -> Self {}
+    fn new() -> Self {
+        todo!()
+    }
 
-    pub fn update_config_from_binary(&self, bin_format: &BinaryFormat, inp: u64, config: &Config);
+    fn update_config_from_binary(&self, bin_format: &BinaryFormat, inp: u64, config: &Config) {
+        todo!()
+    }
 
-    pub fn size(&self, inp: u64, config: &Config) -> u64;
+    fn size(&self, inp: u64, config: &Config) -> u64 {
+        todo!()
+    }
 
-    pub fn middle_bits(&self, config: &Config) -> u8;
+    fn middle_bits(&self, config: &Config) -> u8 {
+        todo!()
+    }
 
-    pub fn longest_bits(&self, config: &Config) -> u8;
+    fn longest_bits(&self, config: &Config) -> u8 {
+        todo!()
+    }
 
-    pub fn setup_memory(&self, void: RefCell<i8>, inp_char: &str, config: &Config);
+    fn setup_memory(&self, void: RefCell<i8>, inp_char: &str, config: &Config) {
+        todo!()
+    }
 
-    pub fn train(&self, inp: u8, &vector1: Vec<f64>, vector2: Vec<f64>);
+    fn train(&self, inp: u8, vector1: &Vec<f64>, vector2: Vec<f64>) {
+        todo!()
+    }
 
-    pub fn train_prob(&self, inp: u8, &vector: Vec<f64>);
+    fn train_prob(&self, inp: u8, vector: &Vec<f64>) {
+        todo!()
+    }
 
-    pub fn finished_loading(&self, config: &Config);
+    fn finished_loading(&self, config: &Config) {
+        todo!()
+    }
 
-    pub fn get_tables(&self, inp_char: &str, order_minus_2: i8) -> &Bins;
+    fn get_tables(&self, inp_char: &str, order_minus_2: i8) -> &Bins {
+        todo!()
+    }
 
-    pub fn longest_table(&self) -> &Bins;
+    fn longest_table(&self) -> &Bins {
+        todo!()
+    }
 }
-
 
 impl Bins {
     fn new(bits: u8, begin: Vec<f32>) -> Self {
@@ -201,12 +221,13 @@ impl Bins {
     }
 
     fn encode(&self, value: f32, reserved: usize) -> u64 {
-        let above = self.begin[reserved..].binary_search_by(|probe| {
-            probe.partial_cmp(&value).unwrap_or(Ordering::Equal)
-        });
+        let above = self.begin[reserved..]
+            .binary_search_by(|probe| probe.partial_cmp(&value).unwrap_or(Ordering::Equal));
         match above {
             Ok(index) | Err(index) if index == 0 => reserved as u64,
-            Ok(index) | Err(index) if index == self.begin.len() - reserved => (self.begin.len() - 1) as u64,
+            Ok(index) | Err(index) if index == self.begin.len() - reserved => {
+                (self.begin.len() - 1) as u64
+            }
             Ok(index) | Err(index) => {
                 let index = index + reserved;
                 if value - self.begin[index - 1] < self.begin[index] - value {
@@ -224,17 +245,6 @@ impl Bins {
     }
 }
 
-enum ModelType {
-    QuantAdd,
-    // Add other variants as needed
-}
-
-struct Config {
-    prob_bits: u8,
-    backoff_bits: u8,
-    // Add other fields as needed
-}
-
 #[derive(Debug)]
 pub struct SeparatelyQuantize {
     tables: [[Bins; 2]; KENLM_MAX_ORDER - 1],
@@ -250,7 +260,11 @@ fn make_bins(values: &mut Vec<f32>, centers: &mut [f32], bins: u32) {
     for i in 0..bins as usize {
         let finish = ((values.len() * (i + 1)) as u64 / bins as u64) as usize;
         if finish == start {
-            centers[i] = if i > 0 { centers[i - 1] } else { f32::NEG_INFINITY };
+            centers[i] = if i > 0 {
+                centers[i - 1]
+            } else {
+                f32::NEG_INFINITY
+            };
         } else {
             centers[i] = values[start..finish].iter().sum::<f32>() / (finish - start) as f32;
         }
@@ -272,15 +286,17 @@ impl SeparatelyQuantize {
             backoff_bits: 0,
         }
     }
-    
+
     pub fn update_config_from_binary(file: &BinaryFormat, offset: u64, config: &mut Config) {
         let buffer = file.read_for_config(3, offset);
         let version = buffer[0];
         config.prob_bits = buffer[1];
         config.backoff_bits = buffer[2];
         if version != K_SEPARATELY_QUANTIZE_VERSION {
-            panic!("This file has quantization version {} but the code expects version {}",
-                   version, K_SEPARATELY_QUANTIZE_VERSION);
+            panic!(
+                "This file has quantization version {} but the code expects version {}",
+                version, K_SEPARATELY_QUANTIZE_VERSION
+            );
         }
     }
 
@@ -315,7 +331,11 @@ impl SeparatelyQuantize {
         let centers = self.tables[order as usize - 2][1].populate();
         centers[0] = K_NO_EXTENSION_BACKOFF;
         centers[1] = K_EXTENSION_BACKOFF;
-        make_bins(&mut backoff, &mut centers[2..], (1 << self.backoff_bits) - 2);
+        make_bins(
+            &mut backoff,
+            &mut centers[2..],
+            (1 << self.backoff_bits) - 2,
+        );
     }
 
     fn train_prob(&mut self, order: u8, mut prob: Vec<f32>) {
@@ -334,7 +354,8 @@ impl SeparatelyQuantize {
 
     fn size(order: u8, config: &Config) -> u64 {
         let longest_table = (1u64 << config.prob_bits as u64) * std::mem::size_of::<f32>() as u64;
-        let middle_table = (1u64 << config.backoff_bits as u64) * std::mem::size_of::<f32>() as u64 + longest_table;
+        let middle_table = (1u64 << config.backoff_bits as u64) * std::mem::size_of::<f32>() as u64
+            + longest_table;
         (order as u64 - 2) * middle_table + longest_table + 8
     }
 
@@ -449,11 +470,6 @@ impl<'a> LongestPointer<'a> {
             self.table.mask(),
         ) as usize)
     }
-}
-
-struct BitAddress {
-    base: Vec<u8>,
-    offset: usize,
 }
 
 fn read_int25(base: &[u8], offset: usize, bits: usize, mask: u64) -> u64 {

@@ -1,30 +1,55 @@
-//
+use crate::constant::*;
+use crate::error::LMError;
+use crate::types::{Config, WordIndex};
+use std::collections::HashMap;
+use std::hash::BuildHasher;
 
-
-pub type WordIndex = usize;
-
+/// Base vocabulary trait that all vocabulary implementations must follow
 pub trait Vocabulary {
+    /// Get the word index for beginning of sentence
     fn begin_sentence(&self) -> WordIndex;
+
+    /// Get the word index for end of sentence  
     fn end_sentence(&self) -> WordIndex;
+
+    /// Get the word index for unknown/not found words
     fn not_found(&self) -> WordIndex;
 
+    /// Get the word index for a string
     fn index(&self, str: &str) -> WordIndex;
 
+    /// Convenience method for String input
     fn index_from_string(&self, str: &String) -> WordIndex {
         self.index(str.as_str())
     }
 
+    /// Convenience method for str input (same as index)
     fn index_from_str(&self, str: &str) -> WordIndex {
         self.index(str)
     }
 
-    fn set_special(&mut self, begin_sentence: WordIndex, end_sentence: WordIndex, not_found: WordIndex);
+    /// Set special word indices
+    fn set_special(
+        &mut self,
+        begin_sentence: WordIndex,
+        end_sentence: WordIndex,
+        not_found: WordIndex,
+    );
+
+    /// Get the size/bound of the vocabulary
+    fn bound(&self) -> WordIndex;
+
+    /// Check if unknown words were encountered during loading
+    fn saw_unk(&self) -> bool;
 }
 
+/// Base vocabulary implementation with default behavior
 pub struct BaseVocabulary {
     begin_sentence: WordIndex,
     end_sentence: WordIndex,
     not_found: WordIndex,
+    bound: WordIndex,
+    saw_unk: bool,
 }
 
 impl Vocabulary for BaseVocabulary {
@@ -41,180 +66,234 @@ impl Vocabulary for BaseVocabulary {
     }
 
     fn index(&self, _str: &str) -> WordIndex {
-        unimplemented!("This method should be implemented by derived classes.")
+        // Base implementation returns not_found for all queries
+        // This should be overridden by concrete implementations
+        self.not_found
     }
 
-    fn set_special(&mut self, begin_sentence: WordIndex, end_sentence: WordIndex, not_found: WordIndex) {
+    fn set_special(
+        &mut self,
+        begin_sentence: WordIndex,
+        end_sentence: WordIndex,
+        not_found: WordIndex,
+    ) {
         self.begin_sentence = begin_sentence;
         self.end_sentence = end_sentence;
         self.not_found = not_found;
+    }
+
+    fn bound(&self) -> WordIndex {
+        self.bound
+    }
+
+    fn saw_unk(&self) -> bool {
+        self.saw_unk
     }
 }
 
 impl BaseVocabulary {
     pub fn new() -> Self {
         Self {
-            begin_sentence: 0,
-            end_sentence: 0,
-            not_found: 0,
+            begin_sentence: BOS_WORD,
+            end_sentence: EOS_WORD,
+            not_found: UNK_WORD,
+            bound: 3, // Start with 3 special words
+            saw_unk: false,
         }
     }
 
-    pub fn with_special(begin_sentence: WordIndex, end_sentence: WordIndex, not_found: WordIndex) -> Self {
+    pub fn with_special(
+        begin_sentence: WordIndex,
+        end_sentence: WordIndex,
+        not_found: WordIndex,
+    ) -> Self {
         let mut vocab = Self::new();
         vocab.set_special(begin_sentence, end_sentence, not_found);
         vocab
     }
+
+    pub fn set_bound(&mut self, bound: WordIndex) {
+        self.bound = bound;
+    }
+
+    pub fn set_saw_unk(&mut self, saw_unk: bool) {
+        self.saw_unk = saw_unk;
+    }
 }
 
+impl Default for BaseVocabulary {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-pub struct ChildVocabulary {
+/// Probing vocabulary using a hash table for fast lookups
+pub struct ProbingVocabulary {
     base: BaseVocabulary,
-    vocab: nplm::Vocabulary,
-    null_word: WordIndex,
+    word_to_index: HashMap<String, WordIndex>,
+    index_to_word: Vec<String>,
 }
 
-impl ChildVocabulary {
-    pub fn new(vocab: nplm::Vocabulary) -> Self {
-        // let base = BaseVocabulary::new(
-        //     vocab.lookup_word("<s>"),
-        //     vocab.lookup_word("</s>"),
-        //     vocab.lookup_word("<unk>"),
-        // );
-        // let null_word = vocab.lookup_word("<null>");
-        // Vocabulary { base, vocab, null_word }
-        todo!()
+impl Vocabulary for ProbingVocabulary {
+    fn begin_sentence(&self) -> WordIndex {
+        self.base.begin_sentence()
     }
 
-    pub fn index(&self, str: &str) -> WordIndex {
-        self.vocab.lookup_word(str)
-    }
-}
-
-pub struct Backend {
-    lm: nplm::NeuralLM,
-    ngram: Eigen::Matrix<i32, Eigen::Dynamic, 1>,
-}
-
-impl Backend {
-    pub fn new(from: &nplm::NeuralLM, cache_size: usize) -> Self {
-        let mut lm = from.clone();
-        lm.set_cache(cache_size);
-        let ngram = Eigen::Matrix::new(from.get_order(), 1);
-        Backend { lm, ngram }
+    fn end_sentence(&self) -> WordIndex {
+        self.base.end_sentence()
     }
 
-    pub fn lm(&self) -> &nplm::NeuralLM {
-        &self.lm
+    fn not_found(&self) -> WordIndex {
+        self.base.not_found()
     }
 
-    pub fn lm_mut(&mut self) -> &mut nplm::NeuralLM {
-        &mut self.lm
+    fn index(&self, str: &str) -> WordIndex {
+        self.word_to_index
+            .get(str)
+            .copied()
+            .unwrap_or(self.not_found())
     }
 
-    pub fn staging_ngram(&mut self) -> &mut Eigen::Matrix<i32, Eigen::Dynamic, 1> {
-        &mut self.ngram
+    fn set_special(
+        &mut self,
+        begin_sentence: WordIndex,
+        end_sentence: WordIndex,
+        not_found: WordIndex,
+    ) {
+        self.base
+            .set_special(begin_sentence, end_sentence, not_found);
     }
 
-    pub fn lookup_from_staging(&mut self) -> f64 {
-        self.lm.lookup_ngram(&self.ngram)
+    fn bound(&self) -> WordIndex {
+        self.base.bound()
     }
 
-    pub fn order(&self) -> i32 {
-        self.lm.get_order()
+    fn saw_unk(&self) -> bool {
+        self.base.saw_unk()
     }
 }
 
-pub struct Model {
-    base_instance: Arc<nplm::NeuralLM>,
-    vocab: Vocabulary,
-    cache_size: usize,
-    backend: Option<Backend>,
-    null_word: WordIndex,
+impl ProbingVocabulary {
+    pub fn new() -> Self {
+        Self {
+            base: BaseVocabulary::new(),
+            word_to_index: HashMap::new(),
+            index_to_word: Vec::new(),
+        }
+    }
+
+    /// Add a word to the vocabulary, returning its index
+    pub fn add_word(&mut self, word: &str) -> WordIndex {
+        if let Some(&existing_index) = self.word_to_index.get(word) {
+            return existing_index;
+        }
+
+        let new_index = self.index_to_word.len() as WordIndex;
+        self.word_to_index.insert(word.to_string(), new_index);
+        self.index_to_word.push(word.to_string());
+        self.base.set_bound((new_index + 1).max(self.base.bound()));
+        new_index
+    }
+
+    /// Get word by index
+    pub fn word(&self, index: WordIndex) -> Option<&str> {
+        self.index_to_word.get(index as usize).map(|s| s.as_str())
+    }
 }
 
-impl Model {
-    pub fn new(file: &str, cache: usize) -> Self {
-        let base_instance = Arc::new(load_nplm(file));
-        let vocab = Vocabulary::new(base_instance.get_vocabulary());
-        let null_word = base_instance.lookup_word("<null>");
-        let mut model = Model {
-            base_instance,
-            vocab,
-            cache_size: cache,
-            backend: None,
-            null_word,
-        };
-        model.init();
-        model
+impl Default for ProbingVocabulary {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Sorted vocabulary for memory-efficient storage and binary search
+pub struct SortedVocabulary {
+    base: BaseVocabulary,
+    words: Vec<String>,
+    sorted: bool,
+}
+
+impl Vocabulary for SortedVocabulary {
+    fn begin_sentence(&self) -> WordIndex {
+        self.base.begin_sentence()
     }
 
-    fn init(&mut self) {
-        self.base_instance.set_log_base(10.0);
-        let begin_sentence = State::new(
-            &vec![self.base_instance.lookup_word("<s>"); NPLM_MAX_ORDER - 1],
-        );
-        let null_context = State::new(
-            &vec![self.null_word; NPLM_MAX_ORDER - 1],
-        );
-        self.init_context(begin_sentence, null_context);
+    fn end_sentence(&self) -> WordIndex {
+        self.base.end_sentence()
     }
 
-    fn init_context(&self, begin_sentence: State, null_context: State) {
-        // Initialize context states
+    fn not_found(&self) -> WordIndex {
+        self.base.not_found()
     }
 
-    pub fn recognize(name: &str) -> bool {
-        match util::open_read_or_throw(name) {
-            Ok(mut file) => {
-                let mut magic_check = [0u8; 16];
-                if let Ok(_) = file.read_exact(&mut magic_check) {
-                    let nnlm_magic = b"\\config\nversion ";
-                    magic_check == nnlm_magic[..]
-                } else {
-                    false
+    fn index(&self, str: &str) -> WordIndex {
+        if !self.sorted {
+            // Linear search if not sorted yet
+            for (i, word) in self.words.iter().enumerate() {
+                if word == str {
+                    return i as WordIndex;
                 }
             }
-            Err(_) => false,
+        } else {
+            // Binary search if sorted
+            match self.words.binary_search(&str.to_string()) {
+                Ok(index) => return index as WordIndex,
+                Err(_) => {}
+            }
         }
+        self.not_found()
     }
 
-    pub fn full_score(
+    fn set_special(
         &mut self,
-        from: &State,
-        new_word: WordIndex,
-        out_state: &mut State,
-    ) -> FullScoreReturn {
-        let backend = self.get_backend();
-        for i in 0..backend.order() - 1 {
-            backend.staging_ngram()[i as usize] = from.words[i as usize];
-        }
-        backend.staging_ngram()[backend.order() as usize - 1] = new_word;
-        let prob = backend.lookup_from_staging();
-        let ngram_length = backend.order();
-        out_state.words.copy_from_slice(&from.words[1..backend.order() as usize - 1]);
-        out_state.words[backend.order() as usize - 2] = new_word;
-        out_state.words[backend.order() as usize - 1..].fill(0);
-        FullScoreReturn { prob, ngram_length }
+        begin_sentence: WordIndex,
+        end_sentence: WordIndex,
+        not_found: WordIndex,
+    ) {
+        self.base
+            .set_special(begin_sentence, end_sentence, not_found);
     }
 
-    pub fn full_score_forgot_state(
-        &mut self,
-        context_rbegin: &[WordIndex],
-        context_rend: &[WordIndex],
-        new_word: WordIndex,
-        out_state: &mut State,
-    ) -> FullScoreReturn {
-        let state_length = std::cmp::min(self.order() as usize - 1, context_rend.len() - context_rbegin.len());
-        let mut state = State::new(&vec![self.null_word; self.order() as usize - 1]);
-        state.words[self.order() as usize - 1 - state_length..].copy_from_slice(&context_rbegin[..state_length]);
-        self.full_score(&state, new_word, out_state)
+    fn bound(&self) -> WordIndex {
+        self.base.bound()
     }
 
-    fn get_backend(&mut self) -> &mut Backend {
-        if self.backend.is_none() {
-            self.backend = Some(Backend::new(&self.base_instance, self.cache_size));
+    fn saw_unk(&self) -> bool {
+        self.base.saw_unk()
+    }
+}
+
+impl SortedVocabulary {
+    pub fn new() -> Self {
+        Self {
+            base: BaseVocabulary::new(),
+            words: Vec::new(),
+            sorted: false,
         }
-        self.backend.as_mut().unwrap()
+    }
+
+    /// Add a word to the vocabulary
+    pub fn add_word(&mut self, word: &str) {
+        self.words.push(word.to_string());
+        self.sorted = false;
+        self.base.set_bound(self.words.len() as WordIndex);
+    }
+
+    /// Sort the vocabulary for efficient binary search
+    pub fn sort(&mut self) {
+        self.words.sort();
+        self.sorted = true;
+    }
+
+    /// Get word by index
+    pub fn word(&self, index: WordIndex) -> Option<&str> {
+        self.words.get(index as usize).map(|s| s.as_str())
+    }
+}
+
+impl Default for SortedVocabulary {
+    fn default() -> Self {
+        Self::new()
     }
 }

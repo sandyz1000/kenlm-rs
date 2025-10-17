@@ -1,9 +1,8 @@
-
 use std::collections::HashMap;
 use std::f32::consts::LOG10_E;
 use std::vec::Vec;
 
-use crate::common::NGram;
+use crate::common::ngram::NGram;
 
 struct ProbBackoff {
     prob: f32,
@@ -47,8 +46,6 @@ impl OutputProbBackoff {
         out.backoff = full_backoff.log10();
     }
 }
-
-
 
 pub struct Callback<Output> {
     backoffs: Vec<HashMap<u64, HashGamma>>,
@@ -104,7 +101,8 @@ impl<Output> Callback<Output> {
             1.0
         };
 
-        self.output.gram(order_minus_1, out_backoff, &mut pay.complete);
+        self.output
+            .gram(order_minus_1, out_backoff, &mut pay.complete);
     }
 }
 

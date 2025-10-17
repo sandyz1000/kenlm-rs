@@ -1,6 +1,7 @@
 use std::cmp;
-use std::usize;
+use std::fmt;
 use std::str;
+use std::usize;
 
 #[derive(Clone, Copy)]
 pub struct StringPiece<'a> {
@@ -130,7 +131,9 @@ impl<'a> StringPiece<'a> {
             if pos > self_str.len() {
                 return None;
             }
-            self_str[pos..].find(s.ptr.unwrap_or("")).map(|index| index + pos)
+            self_str[pos..]
+                .find(s.ptr.unwrap_or(""))
+                .map(|index| index + pos)
         } else {
             None
         }
@@ -209,7 +212,11 @@ impl<'a> StringPiece<'a> {
         }
 
         if s.size() == 1 {
-            return self.ptr?.chars().skip(pos).position(|c| c != s.ptr.unwrap().chars().next().unwrap());
+            return self
+                .ptr?
+                .chars()
+                .skip(pos)
+                .position(|c| c != s.ptr.unwrap().chars().next().unwrap());
         }
 
         let lookup = Self::build_lookup_table(s);
@@ -242,7 +249,11 @@ impl<'a> StringPiece<'a> {
 
         let lookup = Self::build_lookup_table(s);
         if let Some(self_str) = self.ptr {
-            for (i, &byte) in self_str.as_bytes()[..pos.unwrap_or_else(|| self.size())].iter().enumerate().rev() {
+            for (i, &byte) in self_str.as_bytes()[..pos.unwrap_or_else(|| self.size())]
+                .iter()
+                .enumerate()
+                .rev()
+            {
                 if lookup[byte as usize] {
                     return Some(i);
                 }
@@ -282,7 +293,13 @@ impl<'a> StringPiece<'a> {
         }
 
         let pos = pos.unwrap_or_else(|| self.size() - 1);
-        self.ptr?.chars().take(pos + 1).enumerate().rev().find(|(_, ch)| *ch != c).map(|(i, _)| i)
+        self.ptr?
+            .chars()
+            .take(pos + 1)
+            .enumerate()
+            .rev()
+            .find(|(_, ch)| *ch != c)
+            .map(|(i, _)| i)
     }
 }
 
@@ -326,7 +343,6 @@ impl<'a> fmt::Display for StringPiece<'a> {
 impl<'a> StringPiece<'a> {
     pub const NPOS: usize = usize::MAX;
 }
-
 
 // fn main() {
 //     let sp = StringPiece::from_str("Hello, World!");
