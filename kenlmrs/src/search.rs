@@ -1,4 +1,4 @@
-use crate::types::{Config, ProbBackoff, WordIndex};
+use crate::types::{ Config, ProbBackoff, WordIndex };
 use std::marker::PhantomData;
 
 /// Trait for search implementations in language models
@@ -29,7 +29,7 @@ pub trait Search: Default + Sized {
         file: &str,
         counts: &[u64],
         config: &Config,
-        vocab: &mut dyn crate::vocabulary::Vocabulary,
+        vocab: &mut dyn crate::vocabulary::Vocabulary
     ) -> Result<(), crate::error::LMError>;
 
     /// Get the order of this n-gram model
@@ -41,7 +41,7 @@ pub trait Search: Default + Sized {
         word: WordIndex,
         node: &mut Self::Node,
         independent_left: &mut bool,
-        extend_left: &mut u64,
+        extend_left: &mut u64
     ) -> Self::UnigramPointer;
 
     /// Lookup middle n-gram probability
@@ -51,7 +51,7 @@ pub trait Search: Default + Sized {
         word: WordIndex,
         node: &mut Self::Node,
         independent_left: &mut bool,
-        extend_left: &mut u64,
+        extend_left: &mut u64
     ) -> Self::MiddlePointer;
 
     /// Lookup longest n-gram probability
@@ -65,7 +65,7 @@ pub trait Search: Default + Sized {
         &self,
         extend_pointer: u64,
         extend_length: u8,
-        node: &mut Self::Node,
+        node: &mut Self::Node
     ) -> Self::MiddlePointer;
 
     /// Get unknown unigram weights
@@ -105,6 +105,22 @@ pub struct HashedSearch<V> {
     _phantom: PhantomData<V>,
 }
 
+impl<V: Value> HashedSearch<V> {
+    // Helper function to compute hash key from vocabulary IDs
+    // Matches C++ CombineWordHash logic in search_hashed.cc
+    fn compute_hash_key(&self, vocab_ids: &[WordIndex]) -> u64 {
+        if vocab_ids.is_empty() {
+            return 0;
+        }
+
+        let mut key = vocab_ids[0] as u64;
+        for &word in &vocab_ids[1..] {
+            key = combine_word_hash(key, word);
+        }
+        key
+    }
+}
+
 impl<V: Value> Default for HashedSearch<V> {
     fn default() -> Self {
         Self {
@@ -136,12 +152,12 @@ impl<V: Value> Search for HashedSearch<V> {
 
     fn setup_memory(&mut self, _start: &mut [u8], counts: &[u64], _config: &Config) -> &mut [u8] {
         // For now, just initialize with defaults
-        self.unigram = UnigramTable::new();
+        self.unigram = UnigramTable::with_capacity(counts[0] as usize);
         self.middle.clear();
         for _n in 1..counts.len() - 1 {
-            self.middle.push(MiddleTable);
+            self.middle.push(MiddleTable::with_capacity(1000));
         }
-        self.longest = LongestTable::new();
+        self.longest = LongestTable::with_capacity(counts[counts.len() - 1] as usize);
 
         // Return empty slice for now
         &mut []
@@ -149,13 +165,170 @@ impl<V: Value> Search for HashedSearch<V> {
 
     fn initialize_from_arpa(
         &mut self,
-        _file: &str,
-        _counts: &[u64],
-        _config: &Config,
-        _vocab: &mut dyn crate::vocabulary::Vocabulary,
+        file: &str,
+        counts: &[u64],
+        config: &Config,
+        vocab: &mut dyn crate::vocabulary::Vocabulary
     ) -> Result<(), crate::error::LMError> {
-        // Implementation for loading from ARPA files
-        todo!("ARPA loading implementation")
+        // This is the critical function that loads ARPA data into the probing hash tables
+        // Based on C++ lm/search_hashed.cc:235-245 (HashedSearch::InitializeFromARPA)
+
+        use crate::arpa_reader::{ read_ngram_header, read_end, PositiveProbWarn };
+        use crate::constant::WarningAction;
+        use crate::utils::pieces::file::FilePiece;
+
+        // Open the ARPA file
+        let mut file_piece = FilePiece::open(file)?;
+
+        // Create warning handler
+        let warn = PositiveProbWarn::new(WarningAction::Complain);
+
+        // Initialize unigram table with capacity
+        self.unigram = UnigramTable::with_capacity(counts[0] as usize);
+
+        // Read unigrams from ARPA file manually since we need to work with dyn trait
+        read_ngram_header(&mut file_piece, 1)?;
+        for _ in 0..counts[0] {
+            // Read probability
+            let prob = file_piece.read_float()?;
+            let prob = if prob > 0.0 {
+                warn.warn(prob);
+                0.0
+            } else {
+                prob
+            };
+
+            // Expect tab
+            let c = file_piece.get()?;
+            if c != '\t' {
+                return Err(
+                    crate::error::LMError::InvalidArpa(
+                        format!("Expected tab after probability, got '{}'", c)
+                    )
+                );
+            }
+
+            // Read word
+            let word_str = file_piece.read_delimited(&crate::arpa_reader::ARPA_SPACES)?;
+            let word = vocab.index(&word_str);
+
+            // Store probability and backoff
+            if (word as usize) < self.unigram.data.len() {
+                self.unigram.data[word as usize].prob = prob;
+
+                // Read backoff if present
+                match file_piece.get()? {
+                    '\t' => {
+                        self.unigram.data[word as usize].backoff = file_piece.read_float()?;
+                        // Read newline
+                        let nl = file_piece.get()?;
+                        if nl != '\n' && nl != '\r' {
+                            return Err(
+                                crate::error::LMError::InvalidArpa(
+                                    "Expected newline after backoff".to_string()
+                                )
+                            );
+                        }
+                    }
+                    '\n' | '\r' => {
+                        self.unigram.data[word as usize].backoff =
+                            crate::constant::K_NO_EXTENSION_BACKOFF;
+                    }
+                    _ => {
+                        return Err(
+                            crate::error::LMError::InvalidArpa(
+                                "Expected tab or newline for backoff".to_string()
+                            )
+                        );
+                    }
+                }
+            }
+        }
+
+        // Initialize middle tables for orders 2 to n-1
+        self.middle.clear();
+        for n in 2..counts.len() {
+            let capacity = ((counts[n - 1] as f32) * config.probing_multiplier) as usize;
+            self.middle.push(MiddleTable::with_capacity(capacity));
+        }
+
+        // Initialize longest table for highest order
+        let longest_capacity = ((counts[counts.len() - 1] as f32) *
+            config.probing_multiplier) as usize;
+        self.longest = LongestTable::with_capacity(longest_capacity);
+
+        // Read n-grams for each order (2-grams, 3-grams, ..., n-grams)
+        for n in 2..=counts.len() {
+            read_ngram_header(&mut file_piece, n as u32)?;
+
+            let count = counts[n - 1];
+            for _ in 0..count {
+                // Read the n-gram manually
+                let prob = file_piece.read_float()?;
+                let prob = if prob > 0.0 {
+                    warn.warn(prob);
+                    0.0
+                } else {
+                    prob
+                };
+
+                // Read n words
+                let mut vocab_ids = vec![0; n];
+                for i in (0..n).rev() {
+                    let word_str = file_piece.read_delimited(&crate::arpa_reader::ARPA_SPACES)?;
+                    let index = vocab.index(&word_str);
+                    vocab_ids[i] = index;
+                }
+
+                // Read backoff if present
+                let mut backoff = crate::constant::K_NO_EXTENSION_BACKOFF;
+                match file_piece.get()? {
+                    '\t' => {
+                        backoff = file_piece.read_float()?;
+                        // Read newline
+                        let nl = file_piece.get()?;
+                        if nl != '\n' && nl != '\r' {
+                            return Err(
+                                crate::error::LMError::InvalidArpa(
+                                    "Expected newline after backoff".to_string()
+                                )
+                            );
+                        }
+                    }
+                    '\n' | '\r' => {}
+                    _ => {
+                        return Err(
+                            crate::error::LMError::InvalidArpa(
+                                "Expected tab or newline for backoff".to_string()
+                            )
+                        );
+                    }
+                }
+
+                let weights = crate::types::ProbBackoff { prob, backoff };
+
+                // Compute hash key from vocab IDs
+                let key = self.compute_hash_key(&vocab_ids);
+
+                // Insert into appropriate table
+                if n == 2 && counts.len() == 2 {
+                    // Bigram model: goes into longest
+                    self.longest.insert(key, weights.prob);
+                } else if n == counts.len() {
+                    // Highest order: goes into longest
+                    self.longest.insert(key, weights.prob);
+                } else {
+                    // Middle orders: goes into middle[n-2]
+                    let table_idx = n - 2;
+                    self.middle[table_idx].insert(key, weights);
+                }
+            }
+        }
+
+        // Read end marker
+        read_end(&mut file_piece)?;
+
+        Ok(())
     }
 
     fn order(&self) -> u8 {
@@ -167,7 +340,7 @@ impl<V: Value> Search for HashedSearch<V> {
         word: WordIndex,
         node: &mut Self::Node,
         independent_left: &mut bool,
-        extend_left: &mut u64,
+        extend_left: &mut u64
     ) -> Self::UnigramPointer {
         *extend_left = word as u64;
         *node = *extend_left;
@@ -182,7 +355,7 @@ impl<V: Value> Search for HashedSearch<V> {
         word: WordIndex,
         node: &mut Self::Node,
         independent_left: &mut bool,
-        extend_left: &mut u64,
+        extend_left: &mut u64
     ) -> Self::MiddlePointer {
         let key = combine_word_hash(*node, word);
         *extend_left = key;
@@ -213,7 +386,7 @@ impl<V: Value> Search for HashedSearch<V> {
         &self,
         extend_pointer: u64,
         extend_length: u8,
-        node: &mut Self::Node,
+        node: &mut Self::Node
     ) -> Self::MiddlePointer {
         *node = extend_pointer;
         if extend_length == 1 {
@@ -267,7 +440,7 @@ impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
         _file: &str,
         _counts: &[u64],
         _config: &Config,
-        _vocab: &mut dyn crate::vocabulary::Vocabulary,
+        _vocab: &mut dyn crate::vocabulary::Vocabulary
     ) -> Result<(), crate::error::LMError> {
         todo!("Trie ARPA loading")
     }
@@ -281,7 +454,7 @@ impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
         _word: WordIndex,
         _node: &mut Self::Node,
         _independent_left: &mut bool,
-        _extend_left: &mut u64,
+        _extend_left: &mut u64
     ) -> Self::UnigramPointer {
         todo!("Trie unigram lookup")
     }
@@ -292,7 +465,7 @@ impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
         _word: WordIndex,
         _node: &mut Self::Node,
         _independent_left: &mut bool,
-        _extend_left: &mut u64,
+        _extend_left: &mut u64
     ) -> Self::MiddlePointer {
         todo!("Trie middle lookup")
     }
@@ -309,7 +482,7 @@ impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
         &self,
         _extend_pointer: u64,
         _extend_length: u8,
-        _node: &mut Self::Node,
+        _node: &mut Self::Node
     ) -> Self::MiddlePointer {
         todo!("Trie unpack")
     }
@@ -343,9 +516,9 @@ impl Value for RestValue {
     const K_DIFFERENT_REST: bool = true;
 }
 
-pub use crate::bhiksha::{ArrayBhiksha, DontBhiksha};
+pub use crate::bhiksha::{ ArrayBhiksha, DontBhiksha };
 /// Re-export quantization and Bhiksha traits and types
-pub use crate::quantize::{DontQuantize, SeparatelyQuantize};
+pub use crate::quantize::{ DontQuantize, SeparatelyQuantize };
 
 // Traits for quantization and Bhiksha
 pub trait Quantization {}
@@ -357,14 +530,25 @@ impl Bhiksha for DontBhiksha {}
 impl Bhiksha for ArrayBhiksha {}
 
 // Placeholder implementations for hash table structures
+use std::collections::HashMap;
+
 #[derive(Debug)]
 struct UnigramTable {
+    data: Vec<ProbBackoff>,
     unknown: ProbBackoff,
 }
 
 impl UnigramTable {
     fn new() -> Self {
         Self {
+            data: Vec::new(),
+            unknown: ProbBackoff::default(),
+        }
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: vec![ProbBackoff::default(); capacity + 1], // +1 for <unk>
             unknown: ProbBackoff::default(),
         }
     }
@@ -378,8 +562,13 @@ impl UnigramTable {
         Self::new()
     }
 
-    fn lookup<V: Value>(&self, _word: WordIndex) -> HashedUnigramPointer<V> {
-        HashedUnigramPointer::new(0.0, 0.0, false)
+    fn lookup<V: Value>(&self, word: WordIndex) -> HashedUnigramPointer<V> {
+        if (word as usize) < self.data.len() {
+            let weights = &self.data[word as usize];
+            HashedUnigramPointer::new(weights.prob, weights.backoff, true)
+        } else {
+            HashedUnigramPointer::new(self.unknown.prob, self.unknown.backoff, false)
+        }
     }
 
     fn unknown_mut(&mut self) -> &mut ProbBackoff {
@@ -388,28 +577,56 @@ impl UnigramTable {
 }
 
 #[derive(Debug)]
-struct MiddleTable;
+struct MiddleTable {
+    data: HashMap<u64, ProbBackoff>,
+}
 
 impl MiddleTable {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: HashMap::with_capacity(capacity),
+        }
+    }
+
     fn size(_count: u64, _multiplier: f32) -> u64 {
         1024 // Placeholder
     }
 
     fn from_memory(_memory: &mut [u8]) -> Self {
-        Self
+        Self {
+            data: HashMap::new(),
+        }
     }
 
-    fn lookup<V: Value>(&self, _key: u64) -> HashedMiddlePointer<V> {
-        HashedMiddlePointer::new(0.0, 0.0, false)
+    fn insert(&mut self, key: u64, weights: ProbBackoff) {
+        self.data.insert(key, weights);
+    }
+
+    fn lookup<V: Value>(&self, key: u64) -> HashedMiddlePointer<V> {
+        if let Some(weights) = self.data.get(&key) {
+            HashedMiddlePointer::new(weights.prob, weights.backoff, true)
+        } else {
+            HashedMiddlePointer::new(0.0, 0.0, false)
+        }
     }
 }
 
 #[derive(Debug)]
-struct LongestTable;
+struct LongestTable {
+    data: HashMap<u64, f32>,
+}
 
 impl LongestTable {
     fn new() -> Self {
-        Self
+        Self {
+            data: HashMap::new(),
+        }
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: HashMap::with_capacity(capacity),
+        }
     }
 
     fn size(_count: u64, _multiplier: f32) -> u64 {
@@ -417,11 +634,19 @@ impl LongestTable {
     }
 
     fn from_memory(_memory: &mut [u8]) -> Self {
-        Self
+        Self::new()
     }
 
-    fn lookup(&self, _key: u64) -> HashedLongestPointer {
-        HashedLongestPointer::new(0.0)
+    fn insert(&mut self, key: u64, prob: f32) {
+        self.data.insert(key, prob);
+    }
+
+    fn lookup(&self, key: u64) -> HashedLongestPointer {
+        if let Some(&prob) = self.data.get(&key) {
+            HashedLongestPointer::new_found(prob)
+        } else {
+            HashedLongestPointer::new(0.0)
+        }
     }
 }
 
@@ -522,6 +747,10 @@ pub struct HashedLongestPointer {
 
 impl HashedLongestPointer {
     fn new(prob: f32) -> Self {
+        Self { prob, found: false }
+    }
+
+    fn new_found(prob: f32) -> Self {
         Self { prob, found: true }
     }
 }
@@ -574,8 +803,8 @@ impl<Q> Pointer for TrieLongestPointer<Q> {
 
 /// Hash function for combining word indices
 fn combine_word_hash(current: u64, next: WordIndex) -> u64 {
-    (current.wrapping_mul(8978948897894561157))
-        ^ ((1 + next as u64).wrapping_mul(17894857484156487943))
+    current.wrapping_mul(8978948897894561157) ^
+        (1 + (next as u64)).wrapping_mul(17894857484156487943)
 }
 
 // Default implementation for TrieNode

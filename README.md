@@ -6,26 +6,42 @@ A Rust reimplementation of [KenLM Language Model](https://github.com/kpu/kenlm),
 
 🚧 **Work in Progress** - This is an ongoing port of the C++ KenLM to Rust.
 
-### Currently Implemented
-- ✅ Core types (State, Config, ModelType)
-- ✅ Vocabulary management (Sorted and Probing)
-- ✅ ARPA file parsing (counts)
-- ✅ Trie structure (with generic Quantization and Bhiksha)
-- ✅ Configuration system
-- ✅ Basic examples
+### ✅ Fully Implemented
+- **Core types**: State, Config, ModelType, WordIndex
+- **Vocabulary**: Both SortedVocabulary and ProbingVocabulary (add, lookup, index)
+- **ARPA file parsing**: Complete count reading and n-gram parsing
+  - `read_arpa_counts()` - Parse \data\ section
+  - `read_1gram()`, `read_1grams()` - Read unigrams with probabilities and backoffs
+  - `read_ngram()` - Read n-grams (n > 1) with probabilities
+  - `read_ngram_header()` - Parse section headers (\1-grams:, \2-grams:, etc.)
+  - `read_end()` - Validate \end\ marker
+- **File I/O**: FilePiece for memory-efficient file reading
+- **Configuration system**: Full Config struct with load methods
+- **Examples**: 5 working examples demonstrating APIs
 
-### In Progress
-- 🚧 Complete ARPA probability reading
-- 🚧 Trie search algorithms
-- 🚧 Probing hash table implementation
-- 🚧 Binary model serialization
+### 🚧 Partially Implemented (Structures exist but incomplete)
+- **Probing model**: 
+  - ✅ Hash table structure (HashedSearch)
+  - ✅ Basic lookup functions
+  - ❌ ARPA initialization (has `todo!()`)
+  - ❌ Full scoring algorithm
+- **Trie model**: 
+  - ✅ Trie structure with quantization support
+  - ✅ Memory layout definitions
+  - ❌ 16 functions have `unimplemented!()` including:
+    - Middle layer search
+    - Longest n-gram lookup
+    - Node navigation
+    - Memory initialization from ARPA
 
-### Planned
-- ⏳ Quantization support
-- ⏳ Model building from text
-- ⏳ Python bindings (PyO3)
-- ⏳ Memory mapping for large models
-- ⏳ REST costs and interpolation
+### ⏳ Not Yet Implemented
+- Binary model file format (loading/saving)
+- Complete scoring algorithms (FullScore, BaseScore)
+- Quantization implementations (SeparatelyQuantize, etc.)
+- Model building from text (lmplz equivalent)
+- Python bindings (PyO3)
+- Memory mapping for large models
+- REST costs and interpolation
 
 ## Quick Start
 
@@ -96,15 +112,16 @@ kenlmrs/
 
 | Feature | C++ KenLM | kenlm-rs | Status |
 |---------|-----------|----------|--------|
-| ARPA reading | ✅ | 🚧 | Counts done |
-| Probing model | ✅ | 🚧 | Structure ready |
-| Trie model | ✅ | 🚧 | Structure ready |
-| Vocabulary | ✅ | ✅ | Complete |
-| Binary format | ✅ | 🚧 | In progress |
-| Quantization | ✅ | ⏳ | Planned |
+| ARPA reading (counts) | ✅ | ✅ | **Complete** |
+| ARPA reading (n-grams) | ✅ | ✅ | **Complete** |
+| Probing model | ✅ | 🚧 | Structure ready, needs ARPA init |
+| Trie model | ✅ | 🚧 | Structure ready, needs search impl |
+| Vocabulary | ✅ | ✅ | **Complete** |
+| Binary format | ✅ | ⏳ | Not started |
+| Scoring (FullScore) | ✅ | ⏳ | Not started |
+| Quantization | ✅ | ⏳ | Not started |
 | Python bindings | ✅ | ⏳ | Planned |
 
-See [COMPARISON.md](COMPARISON.md) for detailed comparison.
 
 ## Building
 

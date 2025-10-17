@@ -99,11 +99,11 @@ impl Multiple {
     }
 }
 
-pub fn ReadSingle(_in_: IStream, _out: &HashSet<String>) {
+pub fn read_single(_in_: IStream, _out: &HashSet<String>) {
     // TODO: Implement ReadSingle
 }
 
-pub fn ReadMultiple(_in_: IStream, _out_: Substrings) -> i64 {
+pub fn read_multiple(_in_: IStream, _out_: Substrings) -> i64 {
     // TODO: Implement ReadMultiple
     0
 }
