@@ -1,6 +1,5 @@
 /// Test loading ARPA files into probing models
 /// This demonstrates the newly implemented initialize_from_arpa() function
-
 use kenlmrs::model::ProbingModel;
 use kenlmrs::types::Config;
 use std::fs::File;
@@ -57,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match ProbingModel::new(file_path_str, &config) {
         Ok(_model) => {
-            println!("✅ Successfully loaded model!");
+            println!("Successfully loaded model!");
             println!("\n🎉 ARPA loading test PASSED!");
             println!("\nThis means:");
             println!("  ✓ ARPA file parsing works");
@@ -72,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("  • Compare results with C++ KenLM");
         }
         Err(e) => {
-            println!("❌ Failed to load model: {}", e);
+            println!("Failed to load model: {}", e);
             println!("\nThis error indicates which part needs work:");
             println!("{:?}", e);
             return Err(e.into());

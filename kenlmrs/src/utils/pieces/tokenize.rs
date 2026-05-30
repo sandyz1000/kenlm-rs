@@ -146,13 +146,18 @@ where
     }
 
     fn advance(&mut self) {
-        while self.skip_empty && self.current.data.is_empty() {
+        // Loop terminates when: not skipping empties, current is non-empty, or after is exhausted.
+        while self.skip_empty && self.current.data.is_empty() && !self.after.data.is_empty() {
             let found = (self.finder)(self.after.data);
-            self.current = StringPiece::new(&self.after.data[..found.data.len()]);
             if found.data.is_empty() {
+                // No delimiter found — everything remaining is the final token.
+                self.current = self.after.clone();
                 self.after = StringPiece::new("");
             } else {
-                self.after = StringPiece::new(&self.after.data[found.data.len()..]);
+                // Delimiter found at some offset within after. Extract token before it.
+                let offset = found.data.as_ptr() as usize - self.after.data.as_ptr() as usize;
+                self.current = StringPiece::new(&self.after.data[..offset]);
+                self.after = StringPiece::new(&self.after.data[offset + found.data.len()..]);
             }
         }
     }
@@ -169,6 +174,8 @@ where
             None
         } else {
             let item = self.current.clone();
+            // Reset current so advance() will search for the next token.
+            self.current = StringPiece::new("");
             self.advance();
             Some(item)
         }
@@ -185,17 +192,111 @@ fn trim<'a>(mut str: &'a str, spaces: &[bool; 256]) -> &'a str {
     str
 }
 
-// fn main() {
-//     let spaces: [bool; 256] = {
-//         let mut array = [false; 256];
-//         for &c in b" \t\n\r" {
-//             array[c as usize] = true;
-//         }
-//         array
-//     };
+// fn main() { ... }
 
-//     let input = "hello world";
-//     let single_char_finder = SingleCharacter::new(' ');
-//     let trimmed = trim(input, &spaces);
-//     println!("Trimmed: {:?}", trimmed);
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn space_table() -> [bool; 256] {
+        let mut t = [false; 256];
+        for &c in b" \t\n\r" { t[c as usize] = true; }
+        t
+    }
+
+    #[test]
+    fn test_trim_basic() {
+        let spaces = space_table();
+        assert_eq!(trim("  hello  ", &spaces), "hello");
+        assert_eq!(trim("hello", &spaces), "hello");
+        assert_eq!(trim("", &spaces), "");
+        assert_eq!(trim("  ", &spaces), "");
+    }
+
+    #[test]
+    fn test_trim_tabs_and_newlines() {
+        let spaces = space_table();
+        assert_eq!(trim("\thello\n", &spaces), "hello");
+    }
+
+    #[test]
+    fn test_single_character_find_present() {
+        let finder = SingleCharacter::new(' ');
+        let result = finder.find("hello world");
+        assert_eq!(result.data, " ");
+    }
+
+    #[test]
+    fn test_single_character_find_absent() {
+        let finder = SingleCharacter::new('x');
+        let result = finder.find("hello");
+        assert_eq!(result.data, ""); // returns empty slice at end
+    }
+
+    #[test]
+    fn test_multi_character_find_present() {
+        let finder = MultiCharacter::new(StringPiece::new("or"));
+        let result = finder.find("hello world");
+        assert_eq!(result.data, "or");
+    }
+
+    #[test]
+    fn test_multi_character_find_absent() {
+        let finder = MultiCharacter::new(StringPiece::new("xyz"));
+        let result = finder.find("hello");
+        assert_eq!(result.data, "");
+    }
+
+    #[test]
+    fn test_any_character_find_first_match() {
+        // AnyCharacter searches for the `chars` string as a substring
+        // (not individual characters — that's the C++ AnyCharacter semantic here)
+        let finder = AnyCharacter::new(StringPiece::new("ell")); // look for "ell" in input
+        let result = finder.find("hello world");
+        // "ell" found at pos 1 → returns 1-char slice starting there
+        assert_eq!(result.data, "e");
+    }
+
+    #[test]
+    fn test_any_character_find_absent() {
+        let finder = AnyCharacter::new(StringPiece::new("xyz"));
+        let result = finder.find("hello");
+        assert_eq!(result.data, "", "not found → empty slice at end");
+    }
+
+    #[test]
+    fn test_bool_character_find() {
+        let mut delims = [false; 256];
+        BoolCharacter::build(" ,", &mut delims);
+        let finder = BoolCharacter::new(&delims);
+
+        let result = finder.find("hello, world");
+        assert_eq!(result.data, ",");
+    }
+
+    #[test]
+    fn test_bool_character_find_absent() {
+        let delims = [false; 256];
+        let finder = BoolCharacter::new(&delims);
+        let result = finder.find("hello");
+        assert_eq!(result.data, "");
+    }
+
+    #[test]
+    fn test_any_character_last_find() {
+        let finder = AnyCharacterLast::new(StringPiece::new("l"));
+        let result = finder.find("hello");
+        // rfind of 'l' in "hello" → index 3
+        assert_eq!(result.data, "l");
+    }
+
+    #[test]
+    fn test_token_iter_basic() {
+        static INPUT: &str = "hello world foo";
+        let finder = SingleCharacter::new(' ');
+        let f = move |s: &'static str| finder.find(s);
+        let tokens: Vec<_> = TokenIter::new::<()>(INPUT, f, true).collect();
+        let words: Vec<&str> = tokens.iter().map(|t| t.data).collect();
+        assert_eq!(words, vec!["hello", "world", "foo"]);
+    }
+}

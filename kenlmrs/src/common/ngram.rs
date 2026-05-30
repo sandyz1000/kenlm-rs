@@ -2,7 +2,6 @@
 ///
 /// This module provides safe access to n-gram data without using raw pointers.
 use crate::types::WordIndex;
-use std::marker::PhantomData;
 
 /// An N-gram consists of a sequence of word indices and an associated payload.
 /// This implementation uses safe Rust slices instead of raw pointers.
@@ -37,12 +36,12 @@ impl<'a, Payload> NGram<'a, Payload> {
 
     /// Get the first word (same as begin in C++ KenLM)
     pub fn begin(&self) -> WordIndex {
-        self.words[0]
+        *self.words.first().expect("NGram must have at least one word")
     }
 
     /// Get the last word
     pub fn last(&self) -> WordIndex {
-        self.words[self.words.len() - 1]
+        *self.words.last().expect("NGram must have at least one word")
     }
 
     /// Get the payload (probability, backoff, etc.)
@@ -66,134 +65,58 @@ impl<'a, Payload> NGram<'a, Payload> {
     }
 }
 
-/// Mutable version of NGram for when we need to modify the payload
-#[derive(Debug)]
-pub struct NGramMut<'a, Payload> {
-    /// The word indices (immutable even in mutable ngram)
-    words: &'a [WordIndex],
-    /// Mutable payload data
-    payload: &'a mut Payload,
+
+/// An owned n-gram produced by [`NGramIterator`].
+#[derive(Debug, Clone)]
+pub struct OwnedNGram<Payload> {
+    pub words: Vec<WordIndex>,
+    pub payload: Payload,
 }
 
-impl<'a, Payload> NGramMut<'a, Payload> {
-    /// Create a new mutable NGram
-    pub fn new(words: &'a [WordIndex], payload: &'a mut Payload) -> Self {
-        Self { words, payload }
-    }
-
-    /// Get the order of this n-gram
-    pub fn order(&self) -> usize {
-        self.words.len()
-    }
-
-    /// Get the words in this n-gram
-    pub fn words(&self) -> &[WordIndex] {
-        self.words
-    }
-
-    /// Get a specific word by index
-    pub fn word(&self, index: usize) -> WordIndex {
-        self.words[index]
-    }
-
-    /// Get the first word
-    pub fn begin(&self) -> WordIndex {
-        self.words[0]
-    }
-
-    /// Get the last word
-    pub fn last(&self) -> WordIndex {
-        self.words[self.words.len() - 1]
-    }
-
-    /// Get an immutable reference to the payload
-    pub fn value(&self) -> &Payload {
-        self.payload
-    }
-
-    /// Get a mutable reference to the payload
-    pub fn value_mut(&mut self) -> &mut Payload {
-        self.payload
-    }
-
-    /// Convert to an immutable NGram
-    pub fn as_immutable(&self) -> NGram<Payload> {
-        NGram {
-            words: self.words,
-            payload: self.payload,
-        }
-    }
-}
-
-/// Iterator over n-grams in a contiguous buffer
+/// Iterator over a collection of typed n-gram entries.
 ///
-/// This safely iterates over n-grams stored in memory without using raw pointers.
-pub struct NGramIterator<'a, Payload> {
-    /// The underlying data buffer
-    data: &'a [u8],
-    /// Current position in bytes
-    position: usize,
-    /// Order of the n-grams
-    order: usize,
-    /// Size of each n-gram entry in bytes
-    entry_size: usize,
-    _marker: PhantomData<&'a Payload>,
+/// Each entry owns its word list (`Vec<WordIndex>`) and payload value.
+/// There are no raw pointers or `unsafe` blocks — the data is parsed into
+/// owned types before being handed to the iterator.
+///
+/// Build the entries yourself (e.g. while reading an ARPA/binary file) and pass
+/// them to [`NGramIterator::new`].
+pub struct NGramIterator<Payload> {
+    entries: std::vec::IntoIter<OwnedNGram<Payload>>,
+    total: usize,
+    remaining: usize,
 }
 
-impl<'a, Payload> NGramIterator<'a, Payload> {
-    /// Create a new iterator over n-grams
-    pub fn new(data: &'a [u8], order: usize) -> Self {
-        let entry_size = NGram::<Payload>::total_size(order);
+impl<Payload> NGramIterator<Payload> {
+    /// Create an iterator from a `Vec` of pre-parsed, owned n-gram entries.
+    pub fn new(entries: Vec<OwnedNGram<Payload>>) -> Self {
+        let total = entries.len();
         Self {
-            data,
-            position: 0,
-            order,
-            entry_size,
-            _marker: PhantomData,
+            remaining: total,
+            total,
+            entries: entries.into_iter(),
         }
     }
 
-    /// Get the number of n-grams in the buffer
-    pub fn count(&self) -> usize {
-        self.data.len() / self.entry_size
+    /// Total number of entries (including already-consumed ones).
+    pub fn count_total(&self) -> usize {
+        self.total
     }
 }
 
-impl<'a, Payload: 'a> Iterator for NGramIterator<'a, Payload> {
-    type Item = NGram<'a, Payload>;
+impl<Payload> Iterator for NGramIterator<Payload> {
+    type Item = OwnedNGram<Payload>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.position + self.entry_size > self.data.len() {
-            return None;
-        }
-
-        // Get the slice for this entry
-        let entry = &self.data[self.position..self.position + self.entry_size];
-
-        // Words are at the beginning
-        let words_size = self.order * std::mem::size_of::<WordIndex>();
-        let words_bytes = &entry[..words_size];
-
-        // Payload is at the end
-        let payload_bytes = &entry[words_size..];
-
-        // Safety: We're transmuting byte slices to properly aligned types
-        // This is safe because we control the layout and alignment
-        let words = unsafe {
-            std::slice::from_raw_parts(words_bytes.as_ptr() as *const WordIndex, self.order)
-        };
-
-        let payload = unsafe { &*(payload_bytes.as_ptr() as *const Payload) };
-
-        self.position += self.entry_size;
-
-        Some(NGram::new(words, payload))
+        let item = self.entries.next()?;
+        self.remaining -= 1;
+        Some(item)
     }
 }
 
-impl<'a, Payload> ExactSizeIterator for NGramIterator<'a, Payload> {
+impl<Payload> ExactSizeIterator for NGramIterator<Payload> {
     fn len(&self) -> usize {
-        (self.data.len() - self.position) / self.entry_size
+        self.remaining
     }
 }
 
@@ -215,14 +138,13 @@ mod tests {
     }
 
     #[test]
-    fn test_ngram_mut() {
-        let words = vec![1, 2];
+    fn test_ngram_mutable_payload() {
+        // NGramMut was removed; mutate the payload directly and read via NGram.
+        let words = vec![1u32, 2];
         let mut payload = 1.0f32;
-
-        let mut ngram = NGramMut::new(&words, &mut payload);
-
+        payload = 2.0;
+        let ngram = NGram::new(&words, &payload);
         assert_eq!(ngram.order(), 2);
-        *ngram.value_mut() = 2.0;
         assert_eq!(*ngram.value(), 2.0);
     }
 
@@ -231,5 +153,88 @@ mod tests {
         let size = NGram::<f32>::total_size(3);
         let order = NGram::<f32>::order_from_size(size);
         assert_eq!(order, 3);
+    }
+
+    #[test]
+    fn test_ngram_word_access() {
+        let words = vec![10u32, 20, 30, 40];
+        let payload = 0.0f64;
+        let ng = NGram::new(&words, &payload);
+        assert_eq!(ng.word(0), 10);
+        assert_eq!(ng.word(3), 40);
+        assert_eq!(ng.begin(), 10);
+        assert_eq!(ng.last(), 40);
+    }
+
+    #[test]
+    fn test_ngram_total_size_instance() {
+        let words = vec![1u32, 2];
+        let payload = 42u64;
+        let ng = NGram::new(&words, &payload);
+        assert_eq!(ng.total_size_instance(), NGram::<u64>::total_size(2));
+    }
+
+    #[test]
+    fn test_ngram_order_from_size_roundtrip() {
+        for order in 1..=6 {
+            let size = NGram::<f32>::total_size(order);
+            assert_eq!(NGram::<f32>::order_from_size(size), order);
+        }
+    }
+
+    #[test]
+    fn test_ngram_iterator_count() {
+        let entries: Vec<OwnedNGram<f32>> = (0..3)
+            .map(|i| OwnedNGram { words: vec![i as u32], payload: i as f32 })
+            .collect();
+        let iter = NGramIterator::new(entries);
+        assert_eq!(iter.len(), 3);
+        assert_eq!(iter.count_total(), 3);
+    }
+
+    #[test]
+    fn test_ngram_iterator_empty_buffer() {
+        let iter: NGramIterator<f32> = NGramIterator::new(vec![]);
+        assert_eq!(iter.len(), 0);
+    }
+
+    #[test]
+    fn test_ngram_immutable_access() {
+        // Previously tested via NGramMut::as_immutable(); NGram alone suffices.
+        let words = vec![5u32, 6];
+        let payload = 1.0f32;
+        let ng = NGram::new(&words, &payload);
+        assert_eq!(ng.order(), 2);
+        assert_eq!(ng.begin(), 5);
+        assert_eq!(*ng.value(), 1.0);
+    }
+
+    #[test]
+    fn test_ngram_words_slice() {
+        let words = vec![100u32, 200, 300];
+        let payload = 0u8;
+        let ng = NGram::new(&words, &payload);
+        assert_eq!(ng.words(), &[100, 200, 300]);
+    }
+
+    #[test]
+    fn test_ngram_exact_size_iterator() {
+        let entries: Vec<OwnedNGram<u8>> = (0..5)
+            .map(|i| OwnedNGram { words: vec![i as u32, i as u32 + 1], payload: i as u8 })
+            .collect();
+        let iter = NGramIterator::new(entries);
+        assert_eq!(iter.len(), 5);
+    }
+
+    #[test]
+    fn test_ngram_iterator_yields_entries() {
+        let entries = vec![
+            OwnedNGram { words: vec![1u32, 2], payload: 0.5f32 },
+            OwnedNGram { words: vec![3u32, 4], payload: 1.0f32 },
+        ];
+        let collected: Vec<_> = NGramIterator::new(entries).collect();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].words, vec![1, 2]);
+        assert!((collected[1].payload - 1.0).abs() < 1e-6);
     }
 }

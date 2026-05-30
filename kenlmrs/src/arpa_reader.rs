@@ -398,6 +398,24 @@ impl Default for PositiveProbWarn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constant::WarningAction;
+    use crate::vocabulary::ProbingVocabulary;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn make_file(content: &str) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{}", content).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    fn open_piece(content: &str) -> FilePiece {
+        let f = make_file(content);
+        FilePiece::open(f.path()).unwrap()
+    }
+
+    // ── is_entirely_whitespace ────────────────────────────────────────────────
 
     #[test]
     fn test_is_entirely_whitespace() {
@@ -407,9 +425,215 @@ mod tests {
         assert!(!is_entirely_whitespace("  a  "));
     }
 
+    // ── PositiveProbWarn ──────────────────────────────────────────────────────
+
     #[test]
-    fn test_positive_prob_warn() {
+    fn test_positive_prob_warn_silent() {
         let warn = PositiveProbWarn::new(WarningAction::Silent);
-        warn.warn(0.5); // Should not panic with Silent
+        warn.warn(0.5); // must not panic
+    }
+
+    #[test]
+    fn test_positive_prob_warn_complain_once() {
+        let warn = PositiveProbWarn::new(WarningAction::Complain);
+        warn.warn(0.1); // prints to stderr but does not panic
+        warn.warn(0.2); // second call is suppressed by warned flag
+    }
+
+    #[test]
+    #[should_panic(expected = "Positive log probability")]
+    fn test_positive_prob_warn_throw_up() {
+        let warn = PositiveProbWarn::new(WarningAction::ThrowUp);
+        warn.warn(0.5);
+    }
+
+    #[test]
+    fn test_positive_prob_warn_default_throws() {
+        // Default action is ThrowUp
+        let result = std::panic::catch_unwind(|| {
+            let warn = PositiveProbWarn::default();
+            warn.warn(0.1);
+        });
+        assert!(result.is_err(), "Default warn action should panic on positive prob");
+    }
+
+    // ── read_ngram_header ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_read_ngram_header_valid() {
+        let mut fp = open_piece("\\1-grams:\n");
+        read_ngram_header(&mut fp, 1).unwrap();
+    }
+
+    #[test]
+    fn test_read_ngram_header_skips_blank_lines() {
+        let mut fp = open_piece("\n  \n\\2-grams:\n");
+        read_ngram_header(&mut fp, 2).unwrap();
+    }
+
+    #[test]
+    fn test_read_ngram_header_wrong_order() {
+        let mut fp = open_piece("\\3-grams:\n");
+        let err = read_ngram_header(&mut fp, 2).unwrap_err();
+        matches!(err, LMError::InvalidArpa(_));
+    }
+
+    // ── read_arpa_counts ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_read_arpa_counts_basic() {
+        let content = "\
+\\data\\
+ngram 1=5
+ngram 2=12
+ngram 3=3
+
+";
+        let mut fp = open_piece(content);
+        let counts = read_arpa_counts(&mut fp).unwrap();
+        assert_eq!(counts, vec![5, 12, 3]);
+    }
+
+    #[test]
+    fn test_read_arpa_counts_with_comments_and_blank() {
+        let content = "\
+# this is a comment
+
+\\data\\
+ngram 1=100
+
+";
+        let mut fp = open_piece(content);
+        let counts = read_arpa_counts(&mut fp).unwrap();
+        assert_eq!(counts, vec![100]);
+    }
+
+    #[test]
+    fn test_read_arpa_counts_empty_data_section() {
+        let content = "\\data\\\n\n";
+        let mut fp = open_piece(content);
+        let err = read_arpa_counts(&mut fp).unwrap_err();
+        matches!(err, LMError::InvalidArpa(_));
+    }
+
+    #[test]
+    fn test_read_arpa_counts_gzip_magic_bytes() {
+        // gzip magic: 0x1f 0x8b
+        let mut content = vec![0x1fu8, 0x8b];
+        content.extend_from_slice(b" rest of binary garbage\n");
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&content).unwrap();
+        f.flush().unwrap();
+        let mut fp = FilePiece::open(f.path()).unwrap();
+        let err = read_arpa_counts(&mut fp).unwrap_err();
+        matches!(err, LMError::InvalidArpa(_));
+    }
+
+    #[test]
+    fn test_read_arpa_counts_non_consecutive_orders() {
+        let content = "\\data\\\nngram 1=5\nngram 3=2\n\n";
+        let mut fp = open_piece(content);
+        let err = read_arpa_counts(&mut fp).unwrap_err();
+        matches!(err, LMError::InvalidArpa(_));
+    }
+
+    #[test]
+    fn test_read_arpa_counts_wrong_prefix() {
+        let content = "\\data\\\nbad 1=5\n\n";
+        let mut fp = open_piece(content);
+        let err = read_arpa_counts(&mut fp).unwrap_err();
+        matches!(err, LMError::InvalidArpa(_));
+    }
+
+    // ── read_end ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_read_end_valid() {
+        let mut fp = open_piece("\\end\\\n");
+        read_end(&mut fp).unwrap();
+    }
+
+    #[test]
+    fn test_read_end_with_blank_lines_before() {
+        let mut fp = open_piece("\n\n\\end\\\n");
+        read_end(&mut fp).unwrap();
+    }
+
+    #[test]
+    fn test_read_end_wrong_marker() {
+        let mut fp = open_piece("\\done\\\n");
+        let err = read_end(&mut fp).unwrap_err();
+        matches!(err, LMError::InvalidArpa(_));
+    }
+
+    // ── read_1gram / read_1grams ──────────────────────────────────────────────
+
+    #[test]
+    fn test_read_1gram_with_backoff() {
+        // Format: prob TAB word TAB backoff NEWLINE
+        let mut vocab = ProbingVocabulary::new();
+        vocab.add_word("hello");
+        let mut unigrams = vec![ProbBackoff::default(); 2];
+        let warn = PositiveProbWarn::new(WarningAction::Silent);
+
+        let mut fp = open_piece("-1.5\thello\t-0.3\n");
+        read_1gram(&mut fp, &mut vocab, &mut unigrams, &warn).unwrap();
+        assert!((unigrams[0].prob - (-1.5)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_read_1gram_no_backoff() {
+        let mut vocab = ProbingVocabulary::new();
+        vocab.add_word("world");
+        let mut unigrams = vec![ProbBackoff::default(); 2];
+        let warn = PositiveProbWarn::new(WarningAction::Silent);
+
+        let mut fp = open_piece("-2.0\tworld\n");
+        read_1gram(&mut fp, &mut vocab, &mut unigrams, &warn).unwrap();
+        assert!((unigrams[0].prob - (-2.0)).abs() < 1e-5);
+        assert_eq!(unigrams[0].backoff, crate::constant::K_NO_EXTENSION_BACKOFF);
+    }
+
+    #[test]
+    fn test_read_1gram_positive_prob_clamped() {
+        let mut vocab = ProbingVocabulary::new();
+        vocab.add_word("word");
+        let mut unigrams = vec![ProbBackoff::default(); 2];
+        let warn = PositiveProbWarn::new(WarningAction::Silent);
+
+        let mut fp = open_piece("0.5\tword\n");
+        read_1gram(&mut fp, &mut vocab, &mut unigrams, &warn).unwrap();
+        // Positive prob gets clamped to 0.0
+        assert_eq!(unigrams[0].prob, 0.0);
+    }
+
+    // ── full round-trip for a minimal bigram ARPA ─────────────────────────────
+
+    #[test]
+    fn test_full_round_trip_unigram_arpa() {
+        let content = "\
+\\data\\
+ngram 1=3
+
+\\1-grams:
+-99\t<unk>\t0
+-1.5\t<s>\t-0.3
+-1.0\t</s>
+
+\\end\\
+";
+        let mut fp = open_piece(content);
+        let counts = read_arpa_counts(&mut fp).unwrap();
+        assert_eq!(counts, vec![3]);
+
+        let mut vocab = ProbingVocabulary::new();
+        vocab.add_word("<unk>");
+        vocab.add_word("<s>");
+        vocab.add_word("</s>");
+        let mut unigrams = vec![ProbBackoff::default(); 3];
+        let warn = PositiveProbWarn::new(WarningAction::Silent);
+
+        read_1grams(&mut fp, counts[0] as usize, &mut vocab, &mut unigrams, &warn).unwrap();
+        read_end(&mut fp).unwrap();
     }
 }

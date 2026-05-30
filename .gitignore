@@ -74,3 +74,5 @@ Cargo.lock
 
 
 notes/
+.agents
+.memsearch/

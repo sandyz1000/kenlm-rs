@@ -20,7 +20,9 @@ pub const MODEL_VERSION: u32 = 5;
 pub const K_EXTENSION_QUANT: u64 = 1;
 pub const K_NO_EXTENSION_QUANT: u64 = 0;
 pub const K_EXTENSION_BACKOFF: f32 = std::f32::NEG_INFINITY;
-pub const K_NO_EXTENSION_BACKOFF: f32 = 0.0;
+// Negative zero: sign bit set means "no higher-order n-gram extends from here".
+// set_extension() converts this to +0.0 when a child n-gram is discovered.
+pub const K_NO_EXTENSION_BACKOFF: f32 = f32::from_bits(0x80000000u32); // -0.0
 
 #[derive(Debug, Clone)]
 pub enum ARPALoadComplain {

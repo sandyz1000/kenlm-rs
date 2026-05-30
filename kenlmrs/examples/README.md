@@ -141,10 +141,10 @@ state.words[0] = word_index;
 
 These examples demonstrate the API and structure, but some functionality is not yet fully implemented:
 
-- ✅ Vocabulary management
-- ✅ Configuration system
-- ✅ State management
-- ✅ ARPA file parsing (counts)
+- Vocabulary management
+- Configuration system
+- State management
+- ARPA file parsing (counts)
 - 🚧 Complete ARPA probability reading
 - 🚧 Trie construction
 - 🚧 Hash table construction

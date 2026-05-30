@@ -1,6 +1,3 @@
-use std::alloc::{ alloc, dealloc, Layout };
-use std::mem::{ size_of, MaybeUninit };
-use std::ptr::{ null_mut, write };
 use std::marker::PhantomData;
 
 use crate::types::{ ModelType, WordIndex };
@@ -13,25 +10,21 @@ type Config = ();
 pub struct SortedVocabulary;
 pub struct SortedFiles;
 
-// Placeholder pointer structures
 pub struct MiddlePointer {
-    // Will contain pointer to quantized middle data
+    found: bool,
 }
 
 impl MiddlePointer {
     pub fn new<Q: Quantization>(_quant: &Q, _order: u8, _address: BitAddress) -> Self {
-        MiddlePointer {}
+        MiddlePointer { found: !_address.base.is_empty() }
     }
 
     pub fn found(&self) -> bool {
-        // Placeholder - check if pointer is valid
-        true
+        self.found
     }
 }
 
-pub struct LongestPointer {
-    // Will contain pointer to longest n-gram data
-}
+pub struct LongestPointer {}
 
 impl LongestPointer {
     pub fn new<Q: Quantization>(_quant: &Q, _address: BitAddress) -> Self {
@@ -42,7 +35,6 @@ impl LongestPointer {
 const TRIE_SORTED: u8 = 0;
 const MODEL_TYPE: u8 = 1;
 
-// Trait for quantization implementations
 pub trait Quantization: Default {
     fn update_config_from_binary(file: &BinaryFormat, offset: u64, config: &mut Config);
     fn size(order: usize, config: &Config) -> u64;
@@ -50,17 +42,21 @@ pub trait Quantization: Default {
     fn longest_bits(config: &Config) -> u8;
 }
 
-// Trait for Bhiksha implementations
 pub trait BhikshaImpl {
     fn update_config_from_binary(file: &BinaryFormat, offset: u64, config: &mut Config);
 }
 
+/// Trie-based search structure.
+///
+/// The middle layers are stored as a `Vec<Middle>` (one entry per order between
+/// unigrams and the longest order). `Vec` acts as the owning smart pointer here:
+/// it manages the heap allocation and drops all elements automatically.
 pub struct TrieSearch<Quant: Quantization, Bhiksha: BhikshaImpl> {
-    middle_begin_: *mut Middle,
-    middle_end_: *mut Middle,
-    quant_: Quant,
-    longest_: Longest,
-    unigram_: Unigram,
+    /// One `Middle` per intermediate order (order 2 … max_order-1).
+    middles: Vec<Middle>,
+    quant: Quant,
+    longest: Longest,
+    unigram: Unigram,
     _phantom: PhantomData<Bhiksha>,
 }
 
@@ -71,124 +67,49 @@ impl<Quant: Quantization, Bhiksha: BhikshaImpl> TrieSearch<Quant, Bhiksha> {
 
     pub fn new() -> Self {
         TrieSearch {
-            middle_begin_: null_mut(),
-            middle_end_: null_mut(),
-            quant_: Default::default(),
-            longest_: Longest::new(),
-            unigram_: Unigram::new(),
+            middles: Vec::new(),
+            quant: Default::default(),
+            longest: Longest::new(),
+            unigram: Unigram::new(),
             _phantom: PhantomData,
         }
     }
 
     pub fn update_config_from_binary(
         file: &BinaryFormat,
-        counts: &Vec<u64>,
+        counts: &[u64],
         offset: u64,
-        config: &mut Config
+        config: &mut Config,
     ) {
         Quant::update_config_from_binary(file, offset, config);
         if counts.len() > 2 {
             Bhiksha::update_config_from_binary(
                 file,
                 offset + Quant::size(counts.len(), config) + Unigram::size(counts[0]),
-                config
+                config,
             );
         }
     }
 
-    pub fn size(counts: &Vec<u64>, config: &Config) -> u64 {
+    pub fn size(counts: &[u64], config: &Config) -> u64 {
         let mut ret = Quant::size(counts.len(), config) + Unigram::size(counts[0]);
         for i in 1..counts.len() - 1 {
-            ret += Middle::size(
-                Quant::middle_bits(config),
-                counts[i],
-                counts[0],
-                counts[i + 1],
-                config
-            );
+            ret += Middle::size(Quant::middle_bits(config), counts[i], counts[0], counts[i + 1], config);
         }
         ret + Longest::size(Quant::longest_bits(config), counts[counts.len() - 1], counts[0])
     }
 
-    pub fn setup_memory(&mut self, start: *mut u8, counts: &Vec<u64>, config: &Config) -> *mut u8 {
-        // Memory layout:
-        // [Quantization tables] [Unigram array] [Middle[0]] [Middle[1]] ... [Longest]
+    /// Allocates owned storage for each trie layer based on the n-gram counts.
+    ///
+    /// Each layer owns its memory through `Vec<u8>` inside the layer structs.
+    pub fn setup_layers(&mut self, counts: &[u64], config: &Config) {
+        // Unigram layer: Vec-backed, no raw pointers needed.
+        let unigram_count = (counts[0] + 2) as usize;
+        self.unigram.init(vec![UnigramValue::default(); unigram_count]);
 
-        let mut position = start;
-
-        // Step 1: Setup quantization tables (probability/backoff compression)
-        // The quantization object manages its own memory layout
-        // For DontQuantize, this returns position unchanged
-        // For SeparatelyQuantize, this allocates space for lookup tables
-        // position = self.quant_.setup_memory(position, counts.len(), config);
-        // TODO: Uncomment above when Quantization trait has setup_memory method
-
-        // Step 2: Setup unigram table
-        // Unigrams are stored as an array of UnigramValue structs
-        let unigram_size = Unigram::size(counts[0]);
-        unsafe {
-            // Initialize unigram with the allocated memory
-            let unigram_slice = std::slice::from_raw_parts_mut(
-                position as *mut UnigramValue,
-                (counts[0] + 2) as usize // +1 for unknown, +1 for end marker
-            );
-            // Zero out the memory
-            for item in unigram_slice.iter_mut() {
-                *item = UnigramValue::default();
-            }
-            // self.unigram_.init() would go here, but it takes Vec, not slice
-            position = position.add(unigram_size as usize);
-        }
-
-        // Step 3: Setup middle layers
-        // Each middle layer is a bit-packed array with word indices, probabilities, and next pointers
-        let middle_count = if counts.len() > 2 { counts.len() - 2 } else { 0 };
-
-        if middle_count > 0 {
-            self.middle_begin_ = position as *mut Middle;
-
-            for i in 0..middle_count {
-                let middle_bits = Quant::middle_bits(config);
-                let middle_size = Middle::size(
-                    middle_bits,
-                    counts[i + 1], // Number of n-grams in this layer
-                    counts[0], // Vocab size (for word bits)
-                    counts[i + 2], // Next layer size (for next pointer bits)
-                    config
-                );
-
-                // TODO: Actually initialize Middle structure here
-                // This requires implementing BitPackedMiddle properly
-                // For now, just allocate the space
-                unsafe {
-                    position = position.add(middle_size as usize);
-                }
-            }
-
-            self.middle_end_ = position as *mut Middle;
-        } else {
-            // No middle layers (bigram model or less)
-            self.middle_begin_ = null_mut();
-            self.middle_end_ = null_mut();
-        }
-
-        // Step 4: Setup longest layer
-        // The longest layer stores final n-grams with just word indices and probabilities
-        // No next pointers needed since there's nothing after
-        let longest_bits = Quant::longest_bits(config);
-        let longest_size = Longest::size(
-            longest_bits,
-            counts[counts.len() - 1], // Number of longest n-grams
-            counts[0] // Vocab size
-        );
-
-        // TODO: Actually initialize Longest structure here
-        // For now, just allocate the space
-        unsafe {
-            position = position.add(longest_size as usize);
-        }
-
-        position
+        // Middle layers: one per order from 2 to max_order-1.
+        let middle_count = counts.len().saturating_sub(2);
+        self.middles = (0..middle_count).map(|_| Middle { _pad: 0 }).collect();
     }
 
     pub fn initialize_from_arpa(
@@ -198,23 +119,19 @@ impl<Quant: Quantization, Bhiksha: BhikshaImpl> TrieSearch<Quant, Bhiksha> {
         counts: &mut Vec<u64>,
         config: &Config,
         vocab: &mut SortedVocabulary,
-        backing: &mut BinaryFormat
+        backing: &mut BinaryFormat,
     ) {
-        // Implementation for initializing from ARPA file
         unimplemented!()
     }
 
+    /// Number of n-gram orders this search covers.
+    /// Middle layers = orders 2..(max_order-1); add 2 for unigrams + longest.
     pub fn order(&self) -> u8 {
-        // Calculate the distance between pointers
-        let distance = unsafe {
-            (self.middle_end_ as usize).wrapping_sub(self.middle_begin_ as usize) /
-                size_of::<Middle>()
-        };
-        (distance as u8) + 2
+        self.middles.len() as u8 + 2
     }
 
     pub fn unknown_unigram(&mut self) -> &mut ProbBackoff {
-        self.unigram_.unknown()
+        self.unigram.unknown()
     }
 
     pub fn lookup_unigram(
@@ -222,10 +139,10 @@ impl<Quant: Quantization, Bhiksha: BhikshaImpl> TrieSearch<Quant, Bhiksha> {
         word: WordIndex,
         next: &mut NodeRange,
         independent_left: &mut bool,
-        extend_left: &mut u64
+        extend_left: &mut u64,
     ) -> UnigramPointer {
         *extend_left = word as u64;
-        let ret = self.unigram_.find(word as usize, next);
+        let ret = self.unigram.find(word as usize, next);
         *independent_left = next.begin == next.end;
         ret
     }
@@ -234,11 +151,11 @@ impl<Quant: Quantization, Bhiksha: BhikshaImpl> TrieSearch<Quant, Bhiksha> {
         &self,
         extend_pointer: u64,
         extend_length: u8,
-        node: &mut NodeRange
+        node: &mut NodeRange,
     ) -> MiddlePointer {
-        MiddlePointer::new(&self.quant_, extend_length - 2, unsafe {
-            (*self.middle_begin_.add((extend_length - 2) as usize)).read_entry(extend_pointer, node)
-        })
+        let idx = (extend_length - 2) as usize;
+        let address = self.middles[idx].read_entry(extend_pointer, node);
+        MiddlePointer::new(&self.quant, extend_length - 2, address)
     }
 
     pub fn lookup_middle(
@@ -247,24 +164,22 @@ impl<Quant: Quantization, Bhiksha: BhikshaImpl> TrieSearch<Quant, Bhiksha> {
         word: WordIndex,
         node: &mut NodeRange,
         independent_left: &mut bool,
-        extend_left: &mut u64
+        extend_left: &mut u64,
     ) -> MiddlePointer {
-        let address = unsafe {
-            (*self.middle_begin_.add(order_minus_2 as usize)).find(word, node, extend_left)
-        };
+        let address = self.middles[order_minus_2 as usize].find(word, node, extend_left);
         *independent_left = address.base.is_empty() || node.begin == node.end;
-        MiddlePointer::new(&self.quant_, order_minus_2, address)
+        MiddlePointer::new(&self.quant, order_minus_2, address)
     }
 
     pub fn lookup_longest(&self, word: WordIndex, node: &NodeRange) -> LongestPointer {
-        LongestPointer::new(&self.quant_, self.longest_.find(word, node))
+        LongestPointer::new(&self.quant, self.longest.find(word, node))
     }
 
     pub fn fast_make_node(
         &self,
         begin: &[WordIndex],
         end: &[WordIndex],
-        node: &mut NodeRange
+        node: &mut NodeRange,
     ) -> bool {
         assert!(!begin.is_empty());
         let mut independent_left = false;
@@ -274,9 +189,8 @@ impl<Quant: Quantization, Bhiksha: BhikshaImpl> TrieSearch<Quant, Bhiksha> {
             if idx >= end.len() {
                 break;
             }
-            if
-                independent_left ||
-                !self
+            if independent_left
+                || !self
                     .lookup_middle(idx as u8, *word, node, &mut independent_left, &mut ignored)
                     .found()
             {
@@ -285,30 +199,9 @@ impl<Quant: Quantization, Bhiksha: BhikshaImpl> TrieSearch<Quant, Bhiksha> {
         }
         true
     }
-
-    fn free_middles(&mut self) {
-        unsafe {
-            let middle_count =
-                (self.middle_end_ as usize).wrapping_sub(self.middle_begin_ as usize) /
-                size_of::<Middle>();
-            for i in 0..middle_count {
-                std::ptr::drop_in_place(self.middle_begin_.add(i));
-            }
-            if !self.middle_begin_.is_null() {
-                dealloc(
-                    self.middle_begin_ as *mut u8,
-                    Layout::array::<Middle>(middle_count).unwrap()
-                );
-            }
-        }
-    }
 }
 
-impl<Quant: Quantization, Bhiksha: BhikshaImpl> Drop for TrieSearch<Quant, Bhiksha> {
-    fn drop(&mut self) {
-        self.free_middles();
-    }
-}
+// No manual Drop needed: `middles: Vec<Middle>` drops all elements automatically.
 
 // Placeholder structs and functions for `Quant`, `Bhiksha`, `NodeRange`, `Unigram`, `Middle`, and `Longest` that must be implemented
 mod util {
@@ -320,7 +213,7 @@ mod util {
     }
 }
 
-pub struct Middle;
+pub struct Middle { _pad: u8 }
 
 impl Middle {
     /// Calculate memory size for a middle trie layer
@@ -350,7 +243,7 @@ impl Middle {
         let total_bits = word_bits + middle_bits + next_bits;
 
         // Similar to BitPacked::base_size
-        ((count + 1) * (total_bits as u64) + 7) / 8 + 8
+        ((count + 1) * (total_bits as u64)).div_ceil(8) + 8
     }
 
     pub fn read_entry(&self, _extend_pointer: u64, _node: &mut NodeRange) -> BitAddress {
@@ -536,7 +429,7 @@ impl BitPacked {
         // +1 for extra entry at the end (for end pointer)
         // +7 to round up when converting bits to bytes
         // +8 for safety margin to prevent ReadInt57 from going out of bounds
-        ((entries + 1) * (total_bits as u64) + 7) / 8 + 8
+        ((entries + 1) * (total_bits as u64)).div_ceil(8) + 8
     }
 
     /// Initialize bit-packed array

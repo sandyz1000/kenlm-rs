@@ -76,7 +76,7 @@ impl ModelTrait for Model {
         State::new()
     }
 
-    fn null_context_state(&self) -> State {
+    fn empty_context_state(&self) -> State {
         State::new()
     }
 
@@ -110,7 +110,7 @@ fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, prin
     let mut state = if sentence_context {
         model.begin_sentence_state()
     } else {
-        model.null_context_state()
+        model.empty_context_state()
     };
     let mut out = State::new();
     let mut ret;
@@ -127,7 +127,7 @@ fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, prin
         state = if sentence_context {
             model.begin_sentence_state()
         } else {
-            model.null_context_state()
+            model.empty_context_state()
         };
         let mut total = 0.0;
         let mut oov = 0;
@@ -166,7 +166,7 @@ fn query<M: ModelTrait, P: PrinterTrait>(model: &M, sentence_context: bool, prin
 
 pub trait ModelTrait {
     fn begin_sentence_state(&self) -> State;
-    fn null_context_state(&self) -> State;
+    fn empty_context_state(&self) -> State;
     fn full_score(&self, state: State, vocab: WordIndex, out: &mut State) -> FullScoreReturn;
     fn get_vocabulary(&self) -> Vocabulary;
 }

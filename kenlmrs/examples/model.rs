@@ -1,7 +1,7 @@
 /// Model example - demonstrates language model loading and querying
 /// Similar to the Python kenlm example
-use kenlmrs::types::{ Config, State };
-use kenlmrs::vocabulary::{ Vocabulary, ProbingVocabulary };
+use kenlmrs::types::{Config, State};
+use kenlmrs::vocabulary::{ProbingVocabulary, Vocabulary};
 
 fn main() {
     println!("KenLM-RS Model Example");
@@ -23,25 +23,8 @@ fn main() {
     // Build vocabulary similar to a 5-gram model
     println!("Building vocabulary...");
     let words = vec![
-        "<s>",
-        "</s>",
-        "<unk>",
-        "language",
-        "modeling",
-        "is",
-        "fun",
-        ".",
-        "the",
-        "a",
-        "an",
-        "and",
-        "of",
-        "to",
-        "in",
-        "that",
-        "it",
-        "was",
-        "for"
+        "<s>", "</s>", "<unk>", "language", "modeling", "is", "fun", ".", "the", "a", "an", "and",
+        "of", "to", "in", "that", "it", "was", "for",
     ];
 
     for word in &words {
@@ -59,7 +42,10 @@ fn main() {
     let tokens: Vec<&str> = sentence.split_whitespace().collect();
     let score = score_sentence(&tokens, &vocab);
     println!("Total score: {:.4}", score);
-    println!("Perplexity: {:.2}", (10.0f32).powf(-score / (tokens.len() as f32)));
+    println!(
+        "Perplexity: {:.2}",
+        (10.0f32).powf(-score / (tokens.len() as f32))
+    );
     println!();
 
     // Example 2: Full scores with n-gram matching
@@ -80,7 +66,7 @@ fn main() {
     stateful_query_example(&vocab);
     println!();
 
-    println!("✅ Model example completed!");
+    println!("Model example completed!");
 }
 
 /// Score a sentence (simplified)
@@ -123,7 +109,11 @@ fn full_scores_example(tokens: &[&str], vocab: &ProbingVocabulary) {
         let ngram_length = std::cmp::min(context.len() + 1, 5);
 
         // Calculate score
-        let score = if is_oov { -100.0 } else { -1.5 - (ngram_length as f32) * 0.2 };
+        let score = if is_oov {
+            -100.0
+        } else {
+            -1.5 - (ngram_length as f32) * 0.2
+        };
 
         // Build the n-gram string
         let start_idx = if context.len() + 1 > ngram_length {
@@ -134,11 +124,13 @@ fn full_scores_example(tokens: &[&str], vocab: &ProbingVocabulary) {
         let mut ngram = context[start_idx..].to_vec();
         ngram.push(token);
 
-        println!("  {:.4} [{}] {}{}", score, ngram_length, ngram.join(" "), if is_oov {
-            " [OOV]"
-        } else {
-            ""
-        });
+        println!(
+            "  {:.4} [{}] {}{}",
+            score,
+            ngram_length,
+            ngram.join(" "),
+            if is_oov { " [OOV]" } else { "" }
+        );
 
         // Update context
         context.push(token);
@@ -168,14 +160,19 @@ fn oov_detection_example(vocab: &ProbingVocabulary) {
         "is",
         "fun",
         "unknown",
-        "supercalifragilisticexpialidocious"
+        "supercalifragilisticexpialidocious",
     ];
 
     println!("Checking vocabulary membership:");
     for word in test_words {
         let idx = vocab.index(word);
         let in_vocab = idx != vocab.not_found();
-        println!("  \"{}\" -> {} {}", word, idx, if in_vocab { "✓" } else { "[OOV]" });
+        println!(
+            "  \"{}\" -> {} {}",
+            word,
+            idx,
+            if in_vocab { "✓" } else { "[OOV]" }
+        );
     }
 }
 
@@ -220,7 +217,10 @@ fn stateful_query_example(vocab: &ProbingVocabulary) {
     let word3 = "is";
     let word3_idx = vocab.index(word3);
     let score3 = base_score(word3_idx, &state1, vocab);
-    println!("  BaseScore(<s> language modeling, \"{}\") = {:.4}", word3, score3);
+    println!(
+        "  BaseScore(<s> language modeling, \"{}\") = {:.4}",
+        word3, score3
+    );
 
     let total = score1 + score2 + score3;
     println!();

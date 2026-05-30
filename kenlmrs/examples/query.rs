@@ -1,133 +1,80 @@
-/// Query example - similar to KenLM's query_main.cc
-/// This demonstrates how to query a language model for sentence probabilities
-use kenlmrs::types::{ Config, LoadMethod };
-use kenlmrs::vocabulary::{ Vocabulary, ProbingVocabulary };
-use std::io::{ self, BufRead };
+/// KenLM-RS query binary — scores sentences from stdin using a language model.
+///
+/// Matches the output format of the C++ KenLM `query` binary:
+///   p=<log10_prob> [<ngram_len>] <word>
+///   Total: <total> OOV: <oov_count> Tokens: <token_count>
+use clap::Parser;
+use kenlmrs::model::ProbingModel;
+use kenlmrs::types::{Config, State};
+use kenlmrs::vocabulary::Vocabulary;
+use std::io::{self, BufRead};
 
-fn main() {
-    println!("KenLM-RS Query Example");
-    println!("======================\n");
+#[derive(Parser)]
+#[command(name = "query", about = "Score sentences from stdin using a KenLM ARPA model")]
+struct Args {
+    /// Path to the ARPA language model file
+    model: String,
 
-    // Configuration similar to C++ KenLM
-    let mut config = Config::default();
-    config.load_method = LoadMethod::ReadMethod; // Default load method
-    config.probing_multiplier = 1.5;
+    /// Include sentence-boundary markers (<s> at start, </s> at end)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    sentence_context: bool,
+}
 
-    println!("Configuration:");
-    println!("  Load method: {:?}", config.load_method);
-    println!("  Probing multiplier: {}", config.probing_multiplier);
-    println!();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
 
-    // Initialize vocabulary
-    let mut vocab = ProbingVocabulary::new();
-
-    // Add some sample words to vocabulary
-    let words = vec![
-        "<s>",
-        "</s>",
-        "<unk>",
-        "the",
-        "a",
-        "an",
-        "is",
-        "are",
-        "was",
-        "were",
-        "language",
-        "modeling",
-        "fun",
-        "hello",
-        "world",
-        "test"
-    ];
-
-    println!("Building vocabulary with {} words", words.len());
-    for word in &words {
-        vocab.add_word(word);
-    }
-    println!();
-
-    // Demo: Query mode
-    println!("Enter sentences to score (Ctrl+D to exit):");
-    println!("Each sentence will be wrapped with <s> and </s>");
-    println!();
+    eprintln!("Loading model from: {}", args.model);
+    let model = ProbingModel::new(&args.model, &Config::default())?;
+    eprintln!("Model loaded (order {})", model.order());
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
-        match line {
-            Ok(sentence) if !sentence.trim().is_empty() => {
-                score_sentence(&sentence, &vocab, &config);
-            }
-            Ok(_) => {
-                continue;
-            }
-            Err(e) => {
-                eprintln!("Error reading input: {}", e);
-                break;
-            }
+        let sentence = line?;
+        if sentence.trim().is_empty() {
+            continue;
         }
+        score_sentence(&model, &sentence, args.sentence_context);
     }
 
-    println!("\nQuery session complete.");
+    Ok(())
 }
 
-/// Score a sentence and print detailed information
-fn score_sentence(sentence: &str, vocab: &ProbingVocabulary, _config: &Config) {
-    println!("\nScoring: \"{}\"", sentence);
-    println!("{}", "=".repeat(60));
+fn score_sentence(model: &ProbingModel, sentence: &str, sentence_context: bool) {
+    let vocab = model.vocab();
+    let mut state = if sentence_context {
+        model.begin_sentence_state()
+    } else {
+        ProbingModel::empty_context_state()
+    };
 
-    // Tokenize the sentence
-    let tokens: Vec<&str> = sentence.split_whitespace().collect();
+    let mut total = 0.0_f32;
+    let mut oov = 0_usize;
+    let mut token_count = 0_usize;
 
-    // Wrap with sentence markers
-    let mut words = vec!["<s>"];
-    words.extend(&tokens);
-    words.push("</s>");
-
-    println!("Tokens ({} total):", words.len());
-    for (i, word) in words.iter().enumerate() {
+    for word in sentence.split_whitespace() {
         let idx = vocab.index(word);
-        let oov_marker = if idx == vocab.not_found() { " [OOV]" } else { "" };
-        println!("  {}: {} -> {}{}", i, word, idx, oov_marker);
-    }
-    println!();
-
-    // Simulate scoring (placeholder since we don't have a full model yet)
-    println!("Word-level scores:");
-    let mut total_score = 0.0f32;
-    let mut oov_count = 0u32;
-
-    for (i, word) in words.iter().enumerate().skip(1) {
-        let idx = vocab.index(word);
-        let is_oov = idx == vocab.not_found();
-
-        if is_oov {
-            oov_count += 1;
+        if idx == vocab.not_found() {
+            oov += 1;
         }
 
-        // Simulate n-gram matching and scoring
-        // In a real implementation, this would query the trie/hash table
-        let ngram_length = if i == 1 { 1 } else { std::cmp::min(i, 3) };
-        let score = if is_oov { -100.0 } else { -1.5 * (i as f32) }; // Dummy score
+        let mut out = State::default();
+        let ret = model.full_score(&state, idx, &mut out);
+        println!("p={:.6} [{}] {}", ret.prob, ret.ngram_length, word);
 
-        total_score += score;
-
-        let context_start = if i >= ngram_length { i - ngram_length + 1 } else { 0 };
-        let context: Vec<&str> = words[context_start..=i].to_vec();
-
-        println!("  {:8.4} [{}] {} {}", score, ngram_length, context.join(" "), if is_oov {
-            "[OOV]"
-        } else {
-            ""
-        });
+        total += ret.prob;
+        token_count += 1;
+        state = out;
     }
 
-    println!();
-    println!("Sentence score: {:.4}", total_score);
-    println!("OOV words: {}", oov_count);
-    println!("Total tokens: {}", words.len());
+    // Score end-of-sentence marker
+    if sentence_context {
+        let eos = vocab.end_sentence();
+        let mut out = State::default();
+        let ret = model.full_score(&state, eos, &mut out);
+        println!("p={:.6} [{}] </s>", ret.prob, ret.ngram_length);
+        total += ret.prob;
+        token_count += 1;
+    }
 
-    // Perplexity calculation
-    let perplexity = (10.0f32).powf(-total_score / (words.len() as f32));
-    println!("Perplexity: {:.2}", perplexity);
+    println!("Total: {:.6} OOV: {} Tokens: {}", total, oov, token_count);
 }

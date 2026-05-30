@@ -1,8 +1,5 @@
-/// Quantization support for KenLM models
-///
-/// Quantization reduces memory footprint by representing probabilities and backoffs
+/// Quantization support for KenLM models — reduces memory by storing probs/backoffs
 /// with fewer bits.
-
 use crate::ngram::binary_format::BinaryFormat;
 use crate::utils::bit_packing::{
     read_float32, read_int25, read_non_positive_float31, write_float32, write_int57,
@@ -141,8 +138,7 @@ pub struct Bins {
 
 impl Bins {
     fn new(bits: u8, begin: Vec<f32>) -> Self {
-        let mask = if bits > 0 { (1u64 << bits) - 1 } else { 0 };
-        Self { begin, bits, mask }
+        Self { begin, bits, mask: crate::utils::bit_packing::mask_for_bits(bits) }
     }
 
     pub fn populate(&mut self) -> &mut Vec<f32> {

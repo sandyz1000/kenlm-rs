@@ -40,6 +40,10 @@ pub trait Vocabulary {
 
     /// Check if unknown words were encountered during loading
     fn saw_unk(&self) -> bool;
+
+    /// Insert `word` into the vocabulary, returning its index.
+    /// If the word already exists, returns its existing index without duplicating.
+    fn add_word(&mut self, word: &str) -> WordIndex;
 }
 
 /// Base vocabulary implementation with default behavior
@@ -87,6 +91,11 @@ impl Vocabulary for BaseVocabulary {
 
     fn saw_unk(&self) -> bool {
         self.saw_unk.get()
+    }
+
+    fn add_word(&mut self, _word: &str) -> WordIndex {
+        // BaseVocabulary is only a base helper; concrete types override this.
+        unreachable!("add_word called on BaseVocabulary directly")
     }
 }
 
@@ -170,6 +179,10 @@ impl Vocabulary for ProbingVocabulary {
     fn saw_unk(&self) -> bool {
         self.base.saw_unk()
     }
+
+    fn add_word(&mut self, word: &str) -> WordIndex {
+        ProbingVocabulary::add_word(self, word)
+    }
 }
 
 impl ProbingVocabulary {
@@ -247,12 +260,8 @@ impl Vocabulary for SortedVocabulary {
             }
         } else {
             // Binary search if sorted
-            match self.hashes.binary_search(&hash) {
-                Ok(index) => {
-                    // Add 1 because index 0 is reserved for <unk>
-                    return (index + 1) as WordIndex;
-                }
-                Err(_) => {}
+            if let Ok(index) = self.hashes.binary_search(&hash) {
+                return (index + 1) as WordIndex;
             }
         }
         self.not_found()
@@ -274,6 +283,10 @@ impl Vocabulary for SortedVocabulary {
 
     fn saw_unk(&self) -> bool {
         self.base.saw_unk()
+    }
+
+    fn add_word(&mut self, word: &str) -> WordIndex {
+        SortedVocabulary::insert(self, word)
     }
 }
 
@@ -320,20 +333,15 @@ impl SortedVocabulary {
             return;
         }
 
-        // Create indices for sorting
         let mut indices: Vec<usize> = (0..self.hashes.len()).collect();
-        
-        // Sort indices by hash values
-        indices.sort_by_key(|&i| self.hashes[i]);
-        
-        // Reorder both hashes and strings
-        let old_hashes = self.hashes.clone();
-        let old_strings = self.strings.clone();
-        
-        for (new_pos, &old_pos) in indices.iter().enumerate() {
-            self.hashes[new_pos] = old_hashes[old_pos];
-            self.strings[new_pos] = old_strings[old_pos].clone();
-        }
+        indices.sort_unstable_by_key(|&i| self.hashes[i]);
+
+        // Copy hashes (u64 is Copy) and move strings without cloning.
+        let old_hashes: Vec<u64> = self.hashes.clone();
+        let mut old_strings = std::mem::take(&mut self.strings);
+        self.hashes = indices.iter().map(|&i| old_hashes[i]).collect();
+        // Each index appears exactly once — mem::take moves each String out once.
+        self.strings = indices.iter().map(|&i| std::mem::take(&mut old_strings[i])).collect();
         
         self.sorted = true;
     }
@@ -361,5 +369,195 @@ impl SortedVocabulary {
 impl Default for SortedVocabulary {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constant::{BOS_WORD, EOS_WORD, UNK_WORD};
+
+    // ── BaseVocabulary ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_base_vocab_defaults() {
+        let v = BaseVocabulary::new();
+        assert_eq!(v.begin_sentence(), BOS_WORD);
+        assert_eq!(v.end_sentence(), EOS_WORD);
+        assert_eq!(v.not_found(), UNK_WORD);
+        assert_eq!(v.bound(), 3);
+        assert!(!v.saw_unk());
+    }
+
+    #[test]
+    fn test_base_vocab_set_special() {
+        let mut v = BaseVocabulary::new();
+        v.set_special(10, 11, 12);
+        assert_eq!(v.begin_sentence(), 10);
+        assert_eq!(v.end_sentence(), 11);
+        assert_eq!(v.not_found(), 12);
+    }
+
+    #[test]
+    fn test_base_vocab_saw_unk() {
+        let v = BaseVocabulary::new();
+        assert!(!v.saw_unk());
+        v.set_saw_unk(true);
+        assert!(v.saw_unk());
+        v.set_saw_unk(false);
+        assert!(!v.saw_unk());
+    }
+
+    #[test]
+    fn test_base_vocab_with_special() {
+        let v = BaseVocabulary::with_special(5, 6, 7);
+        assert_eq!(v.begin_sentence(), 5);
+        assert_eq!(v.end_sentence(), 6);
+        assert_eq!(v.not_found(), 7);
+    }
+
+    // ── ProbingVocabulary ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_probing_vocab_add_and_lookup() {
+        let mut v = ProbingVocabulary::new();
+        let idx = v.add_word("hello");
+        assert_eq!(v.index("hello"), idx);
+        assert_eq!(v.word(idx), Some("hello"));
+    }
+
+    #[test]
+    fn test_probing_vocab_unknown_word() {
+        let v = ProbingVocabulary::new();
+        assert_eq!(v.index("missing"), v.not_found());
+    }
+
+    #[test]
+    fn test_probing_vocab_duplicate_add_returns_same_index() {
+        let mut v = ProbingVocabulary::new();
+        let i1 = v.add_word("dup");
+        let i2 = v.add_word("dup");
+        assert_eq!(i1, i2);
+    }
+
+    #[test]
+    fn test_probing_vocab_multiple_words() {
+        let mut v = ProbingVocabulary::new();
+        let i1 = v.add_word("apple");
+        let i2 = v.add_word("banana");
+        let i3 = v.add_word("cherry");
+        assert_ne!(i1, i2);
+        assert_ne!(i2, i3);
+        assert_eq!(v.index("apple"), i1);
+        assert_eq!(v.index("banana"), i2);
+        assert_eq!(v.index("cherry"), i3);
+    }
+
+    #[test]
+    fn test_probing_vocab_bound_grows() {
+        let mut v = ProbingVocabulary::new();
+        let before = v.bound();
+        v.add_word("new_word");
+        assert!(v.bound() > before || v.bound() >= 1);
+    }
+
+    #[test]
+    fn test_probing_vocab_word_out_of_range_returns_none() {
+        let v = ProbingVocabulary::new();
+        assert_eq!(v.word(9999), None);
+    }
+
+    #[test]
+    fn test_probing_vocab_special_words() {
+        let v = ProbingVocabulary::new();
+        assert_eq!(v.begin_sentence(), BOS_WORD);
+        assert_eq!(v.end_sentence(), EOS_WORD);
+        assert_eq!(v.not_found(), UNK_WORD);
+    }
+
+    #[test]
+    fn test_probing_vocab_set_special() {
+        let mut v = ProbingVocabulary::new();
+        v.set_special(20, 21, 22);
+        assert_eq!(v.begin_sentence(), 20);
+        assert_eq!(v.end_sentence(), 21);
+        assert_eq!(v.not_found(), 22);
+    }
+
+    // ── SortedVocabulary ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sorted_vocab_insert_and_lookup() {
+        let mut v = SortedVocabulary::new();
+        let i = v.insert("hello");
+        v.finished_loading();
+        assert_eq!(v.index("hello"), i);
+    }
+
+    #[test]
+    fn test_sorted_vocab_unknown_returns_not_found() {
+        let mut v = SortedVocabulary::new();
+        v.insert("foo");
+        v.finished_loading();
+        assert_eq!(v.index("bar"), v.not_found());
+    }
+
+    #[test]
+    fn test_sorted_vocab_unk_detection() {
+        let mut v = SortedVocabulary::new();
+        // "<unk>" and "<UNK>" map to index 0 and set saw_unk
+        let i_unk = v.insert("<unk>");
+        assert_eq!(i_unk, 0);
+        assert!(v.saw_unk());
+    }
+
+    #[test]
+    fn test_sorted_vocab_finished_loading_sorts() {
+        let mut v = SortedVocabulary::new();
+        v.insert("zebra");
+        v.insert("apple");
+        v.insert("mango");
+        v.finished_loading();
+        // After sorting, binary search should find all words
+        assert_ne!(v.index("zebra"), v.not_found());
+        assert_ne!(v.index("apple"), v.not_found());
+        assert_ne!(v.index("mango"), v.not_found());
+    }
+
+    #[test]
+    fn test_sorted_vocab_double_sort_is_idempotent() {
+        let mut v = SortedVocabulary::new();
+        v.insert("a");
+        v.insert("b");
+        v.finished_loading();
+        v.finished_loading(); // second call should be a no-op
+        assert_ne!(v.index("a"), v.not_found());
+    }
+
+    #[test]
+    fn test_sorted_vocab_word_by_index() {
+        let mut v = SortedVocabulary::new();
+        v.insert("hello");
+        v.finished_loading();
+        assert_eq!(v.word(0), Some("<unk>"));
+        // Index 1 is the first real word inserted
+        assert!(v.word(1).is_some());
+    }
+
+    #[test]
+    fn test_sorted_vocab_size() {
+        let mut v = SortedVocabulary::new();
+        assert_eq!(v.size(), 1); // only <unk>
+        v.insert("a");
+        v.insert("b");
+        assert_eq!(v.size(), 3); // <unk> + 2 words
+    }
+
+    #[test]
+    fn test_sorted_vocab_add_word_alias() {
+        let mut v = SortedVocabulary::new();
+        let i = v.add_word("test");
+        v.finished_loading();
+        assert_ne!(i, v.not_found());
     }
 }

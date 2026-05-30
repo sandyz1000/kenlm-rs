@@ -1,10 +1,4 @@
-/// MurmurHash2, 64-bit versions, by Austin Appleby
-/// 
-/// The same caveats as 32-bit MurmurHash2 apply here - beware of alignment 
-/// and endian-ness issues if used across multiple platforms.
-/// 
-/// 64-bit hash for 64-bit platforms
-
+/// MurmurHash2 64-bit (Austin Appleby). Beware alignment/endian-ness across platforms.
 const M: u64 = 0xc6a4a7935bd1e995;
 const R: i32 = 47;
 
@@ -67,9 +61,9 @@ pub fn hash_for_vocab(s: &str) -> u64 {
     murmur_hash_64a(s.as_bytes(), 0)
 }
 
-/// Known hash values for special tokens
-pub const UNKNOWN_HASH: u64 = 0x0020_5dd0_f5d0_01ba; // hash of "<unk>"
-pub const UNKNOWN_CAP_HASH: u64 = 0x0020_5dd0_8c23_eb06; // hash of "<UNK>"
+/// Known hash values for special tokens (murmur_hash_64a with seed=0)
+pub const UNKNOWN_HASH: u64 = 0xea91_e756_1f5b_392b; // hash of "<unk>"
+pub const UNKNOWN_CAP_HASH: u64 = 0x7e16_3219_007d_2f54; // hash of "<UNK>"
 
 #[cfg(test)]
 mod tests {
@@ -77,18 +71,45 @@ mod tests {
 
     #[test]
     fn test_murmur_hash() {
-        // Test with empty string
-        let h = murmur_hash_64a(b"", 0);
-        assert_ne!(h, 0);
+        // Empty string with seed 0 produces 0 (by construction of the algorithm)
+        let h_empty = murmur_hash_64a(b"", 0);
+        assert_eq!(h_empty, 0);
 
-        // Test with simple string
+        // Non-empty strings produce non-zero hashes
         let h1 = murmur_hash_64a(b"hello", 0);
+        assert_ne!(h1, 0);
+
+        // Same input → same output (deterministic)
         let h2 = murmur_hash_64a(b"hello", 0);
         assert_eq!(h1, h2);
 
-        // Different strings should (usually) have different hashes
+        // Different strings produce different hashes
         let h3 = murmur_hash_64a(b"world", 0);
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_murmur_hash_seed_matters() {
+        let h1 = murmur_hash_64a(b"test", 0);
+        let h2 = murmur_hash_64a(b"test", 42);
+        assert_ne!(h1, h2, "different seeds should produce different hashes");
+    }
+
+    #[test]
+    fn test_murmur_hash_long_string() {
+        // Exercises the 8-byte block path (len >= 8)
+        let h = murmur_hash_64a(b"hello world!", 0);
+        assert_ne!(h, 0);
+        assert_eq!(h, murmur_hash_64a(b"hello world!", 0));
+    }
+
+    #[test]
+    fn test_hash_for_vocab_unk_constants() {
+        // Verify the pre-computed constants match runtime values
+        assert_eq!(hash_for_vocab("<unk>"), UNKNOWN_HASH,
+            "UNKNOWN_HASH constant must match runtime hash of '<unk>'");
+        assert_eq!(hash_for_vocab("<UNK>"), UNKNOWN_CAP_HASH,
+            "UNKNOWN_CAP_HASH constant must match runtime hash of '<UNK>'");
     }
 
     #[test]

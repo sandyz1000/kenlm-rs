@@ -1,4 +1,5 @@
-use crate::types::{ Config, ProbBackoff, WordIndex };
+use crate::model::{is_independent_left, mark_extends_left, mark_independent, scoring_prob, set_extension};
+use crate::types::{Config, ProbBackoff, WordIndex};
 use std::marker::PhantomData;
 
 /// Trait for search implementations in language models
@@ -106,13 +107,248 @@ pub struct HashedSearch<V> {
 }
 
 impl<V: Value> HashedSearch<V> {
-    // Helper function to compute hash key from vocabulary IDs
-    // Matches C++ CombineWordHash logic in search_hashed.cc
-    fn compute_hash_key(&self, vocab_ids: &[WordIndex]) -> u64 {
+    /// Reads an optional backoff value from `file_piece` after a probability or word token.
+    /// Expects either `\t<float>\n` (backoff present) or `\n`/`\r` (no backoff → K_NO_EXTENSION_BACKOFF).
+    fn read_backoff(
+        file_piece: &mut crate::utils::pieces::file::FilePiece,
+    ) -> Result<f32, crate::error::LMError> {
+        use crate::constant::K_NO_EXTENSION_BACKOFF;
+        match file_piece.get()? {
+            '\t' => {
+                let bo = file_piece.read_float()?;
+                let nl = file_piece.get()?;
+                if nl != '\n' && nl != '\r' {
+                    return Err(crate::error::LMError::InvalidArpa(
+                        "Expected newline after backoff".to_string(),
+                    ));
+                }
+                Ok(bo)
+            }
+            '\n' | '\r' => Ok(K_NO_EXTENSION_BACKOFF),
+            other => Err(crate::error::LMError::InvalidArpa(format!(
+                "Expected tab or newline for backoff, got '{other}'"
+            ))),
+        }
+    }
+
+    /// Builds incremental hash keys for an n-gram whose words are in reversed ARPA order
+    /// (vocab_ids[0] = new word, vocab_ids[1] = most-recent context, etc.).
+    ///
+    /// Returns a `Vec` of length `n-1` where `keys[k]` is the hash of the (k+2)-gram
+    /// formed by vocab_ids[0..=k+1]. The final key `keys[n-2]` is the hash for the whole
+    /// n-gram and matches C++ `ReadNGrams::keys[n-2]`.
+    fn build_ngram_keys(vocab_ids: &[WordIndex]) -> Vec<u64> {
+        assert!(vocab_ids.len() >= 2, "build_ngram_keys requires at least a bigram");
+        vocab_ids[1..]
+            .iter()
+            .scan(vocab_ids[0] as u64, |acc, &w| {
+                *acc = combine_word_hash(*acc, w);
+                Some(*acc)
+            })
+            .collect()
+    }
+
+    /// C++ FindLower + AdjustLower: clears the `independent_left` sign bit on the new word's
+    /// unigram AND on any missing intermediate scoring-chain n-grams (inserting blank entries).
+    ///
+    /// Blank entries are inserted at any scoring-chain level that doesn't yet have an entry,
+    /// so that `lookup_middle` can chain through them to reach the actual higher-order n-gram.
+    fn find_lower_and_mark_extends(
+        unigrams: &mut Vec<ProbBackoff>,
+        middle: &mut Vec<MiddleTable>,
+        vocab_ids: &[WordIndex],
+        keys: &[u64],
+    ) {
+        use crate::constant::K_NO_EXTENSION_BACKOFF;
+
+        let n = vocab_ids.len();
+        let new_word = vocab_ids[0] as usize;
+
+        if n == 2 {
+            // Bigram: mark the new word's unigram as extending left.
+            if new_word < unigrams.len() {
+                unigrams[new_word].prob = mark_extends_left(unigrams[new_word].prob);
+            }
+            return;
+        }
+
+        // n ≥ 3: Walk scoring-chain levels from (n-3) down to 0.
+        // Insert blank entries for any missing intermediate levels and record where we stopped.
+        let mut found_level: Option<usize> = None;
+        for level in (0..=(n - 3)).rev() {
+            let key = keys[level];
+            if middle[level].data.contains_key(&key) {
+                found_level = Some(level);
+                break;
+            }
+            // Insert blank: backoff = -0.0 (no extension until a child is found).
+            middle[level].data.insert(key, ProbBackoff {
+                prob: mark_independent(0.0_f32),
+                backoff: K_NO_EXTENSION_BACKOFF,
+            });
+        }
+
+        // Mark all levels from the bottom (found or 0) up to n-3 as extending left.
+        let bottom = found_level.unwrap_or(0);
+        for level in bottom..=(n - 3) {
+            let key = keys[level];
+            if let Some(entry) = middle[level].data.get_mut(&key) {
+                entry.prob = mark_extends_left(entry.prob);
+            }
+        }
+
+        // If we fell all the way to the unigram level, clear its sign bit too.
+        if found_level.is_none() && new_word < unigrams.len() {
+            unigrams[new_word].prob = mark_extends_left(unigrams[new_word].prob);
+        }
+    }
+
+    /// C++ ActivateLowerMiddle / ActivateUnigram: sets the extension bit on the backoff of
+    /// the ARPA-order context n-gram (so `state.length` reflects that a child exists).
+    ///
+    /// The ARPA-order context uses key chain starting from `vocab_ids[1]`, which is the
+    /// scoring key for the (n-1)-gram whose new_word is vocab_ids[1].
+    fn activate_context_backoff(
+        unigrams: &mut Vec<ProbBackoff>,
+        middle: &mut Vec<MiddleTable>,
+        vocab_ids: &[WordIndex],
+    ) {
+        let n = vocab_ids.len();
+        if n == 2 {
+            // Context is the unigram vocab_ids[1]; set extension on its backoff.
+            let ctx = vocab_ids[1] as usize;
+            if ctx < unigrams.len() {
+                set_extension(&mut unigrams[ctx].backoff);
+            }
+        } else {
+            // Context is the (n-1)-gram stored in middle[n-3].
+            // Its scoring key is comb_chain(vocab_ids[1], vocab_ids[2], ..., vocab_ids[n-1]).
+            let mut hash = vocab_ids[1] as u64;
+            for &w in &vocab_ids[2..] {
+                hash = combine_word_hash(hash, w);
+            }
+            let ctx_level = n - 3;
+            if let Some(entry) = middle[ctx_level].data.get_mut(&hash) {
+                set_extension(&mut entry.backoff);
+            }
+        }
+    }
+
+    /// Reads and stores unigrams from an already-positioned `FilePiece`.
+    /// Each probability is stored with the sign bit set (`mark_independent`) to indicate that
+    /// no higher-order match has been discovered yet.
+    fn load_unigrams(
+        &mut self,
+        file_piece: &mut crate::utils::pieces::file::FilePiece,
+        count: u64,
+        vocab: &mut dyn crate::vocabulary::Vocabulary,
+        warn: &crate::arpa_reader::PositiveProbWarn,
+    ) -> Result<(), crate::error::LMError> {
+        use crate::arpa_reader::read_ngram_header;
+        use crate::constant::K_NO_EXTENSION_BACKOFF;
+
+        read_ngram_header(file_piece, 1)?;
+        // +1 so slot 0 (UNK) is always valid even if the ARPA omits <unk>
+        self.unigram = UnigramTable::with_capacity(count as usize + 1);
+
+        // Pre-register the three special words so they always land at the
+        // canonical indices (0=<unk>, 1=<s>, 2=</s>) matching C++ KenLM.
+        vocab.add_word("<unk>");
+        vocab.add_word("<s>");
+        vocab.add_word("</s>");
+
+        for _ in 0..count {
+            let raw_prob = file_piece.read_float()?;
+            let raw_prob = if raw_prob > 0.0 {
+                warn.warn(raw_prob);
+                0.0_f32
+            } else {
+                raw_prob
+            };
+
+            let c = file_piece.get()?;
+            if c != '\t' {
+                return Err(crate::error::LMError::InvalidArpa(format!(
+                    "Expected tab after probability, got '{c}'"
+                )));
+            }
+
+            let word_str = file_piece.read_delimited(&crate::arpa_reader::ARPA_SPACES)?;
+            // add_word inserts if new, returns existing index if already present.
+            let word = vocab.add_word(&word_str);
+
+            if (word as usize) < self.unigram.data.len() {
+                // Mark as independent: no higher-order n-gram has claimed this as context yet.
+                self.unigram.data[word as usize].prob = mark_independent(raw_prob);
+
+                self.unigram.data[word as usize].backoff = Self::read_backoff(file_piece)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads and inserts all n-grams at order `n` from an already-positioned `FilePiece`,
+    /// then marks each n-gram's context as having a left extension.
+    fn load_order(
+        &mut self,
+        file_piece: &mut crate::utils::pieces::file::FilePiece,
+        n: usize,
+        count: u64,
+        total_orders: usize,
+        vocab: &mut dyn crate::vocabulary::Vocabulary,
+        warn: &crate::arpa_reader::PositiveProbWarn,
+    ) -> Result<(), crate::error::LMError> {
+        use crate::arpa_reader::read_ngram_header;
+
+        read_ngram_header(file_piece, n as u32)?;
+
+        for _ in 0..count {
+            let raw_prob = file_piece.read_float()?;
+            let raw_prob = if raw_prob > 0.0 {
+                warn.warn(raw_prob);
+                0.0_f32
+            } else {
+                raw_prob
+            };
+
+            // vocab_ids stored in REVERSED ARPA order: vocab_ids[0]=new_word, vocab_ids[1..]=context
+            let mut vocab_ids = vec![0u32; n];
+            for slot in vocab_ids.iter_mut().rev() {
+                let word_str = file_piece.read_delimited(&crate::arpa_reader::ARPA_SPACES)?;
+                *slot = vocab.index(&word_str);
+            }
+
+            let backoff = Self::read_backoff(file_piece)?;
+
+            let keys = Self::build_ngram_keys(&vocab_ids);
+            let ngram_key = keys[n - 2];
+
+            // New n-grams start as independent (sign bit set); context marking below may
+            // clear the sign bit of a lower-order entry.
+            let stored_prob = mark_independent(raw_prob);
+
+            if n == total_orders {
+                // Longest order: no backoff stored (nothing extends further).
+                self.longest.insert(ngram_key, stored_prob);
+            } else {
+                // Middle order
+                let table_idx = n - 2;
+                self.middle[table_idx].insert(ngram_key, ProbBackoff { prob: stored_prob, backoff });
+            }
+
+            // Insert blank scoring-chain intermediates and mark new_word as extending left.
+            let (unigrams, middle) = (&mut self.unigram.data, &mut self.middle);
+            Self::find_lower_and_mark_extends(unigrams, middle, &vocab_ids, &keys);
+            // Set the extension bit on the ARPA-order context's backoff (for state.length).
+            Self::activate_context_backoff(unigrams, middle, &vocab_ids);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn compute_hash_key(&self, vocab_ids: &[WordIndex]) -> u64 {
         if vocab_ids.is_empty() {
             return 0;
         }
-
         let mut key = vocab_ids[0] as u64;
         for &word in &vocab_ids[1..] {
             key = combine_word_hash(key, word);
@@ -168,167 +404,36 @@ impl<V: Value> Search for HashedSearch<V> {
         file: &str,
         counts: &[u64],
         config: &Config,
-        vocab: &mut dyn crate::vocabulary::Vocabulary
+        vocab: &mut dyn crate::vocabulary::Vocabulary,
     ) -> Result<(), crate::error::LMError> {
-        // This is the critical function that loads ARPA data into the probing hash tables
-        // Based on C++ lm/search_hashed.cc:235-245 (HashedSearch::InitializeFromARPA)
-
-        use crate::arpa_reader::{ read_ngram_header, read_end, PositiveProbWarn };
+        use crate::arpa_reader::{read_arpa_counts, read_end, PositiveProbWarn};
         use crate::constant::WarningAction;
         use crate::utils::pieces::file::FilePiece;
 
-        // Open the ARPA file
-        let mut file_piece = FilePiece::open(file)?;
+        let mut fp = FilePiece::open(file)?;
 
-        // Create warning handler
+        // Consume the \data\ header so the file is positioned at the first \N-grams: section.
+        read_arpa_counts(&mut fp)?;
+
         let warn = PositiveProbWarn::new(WarningAction::Complain);
+        let total_orders = counts.len();
 
-        // Initialize unigram table with capacity
-        self.unigram = UnigramTable::with_capacity(counts[0] as usize);
+        self.load_unigrams(&mut fp, counts[0], vocab, &warn)?;
 
-        // Read unigrams from ARPA file manually since we need to work with dyn trait
-        read_ngram_header(&mut file_piece, 1)?;
-        for _ in 0..counts[0] {
-            // Read probability
-            let prob = file_piece.read_float()?;
-            let prob = if prob > 0.0 {
-                warn.warn(prob);
-                0.0
-            } else {
-                prob
-            };
-
-            // Expect tab
-            let c = file_piece.get()?;
-            if c != '\t' {
-                return Err(
-                    crate::error::LMError::InvalidArpa(
-                        format!("Expected tab after probability, got '{}'", c)
-                    )
-                );
-            }
-
-            // Read word
-            let word_str = file_piece.read_delimited(&crate::arpa_reader::ARPA_SPACES)?;
-            let word = vocab.index(&word_str);
-
-            // Store probability and backoff
-            if (word as usize) < self.unigram.data.len() {
-                self.unigram.data[word as usize].prob = prob;
-
-                // Read backoff if present
-                match file_piece.get()? {
-                    '\t' => {
-                        self.unigram.data[word as usize].backoff = file_piece.read_float()?;
-                        // Read newline
-                        let nl = file_piece.get()?;
-                        if nl != '\n' && nl != '\r' {
-                            return Err(
-                                crate::error::LMError::InvalidArpa(
-                                    "Expected newline after backoff".to_string()
-                                )
-                            );
-                        }
-                    }
-                    '\n' | '\r' => {
-                        self.unigram.data[word as usize].backoff =
-                            crate::constant::K_NO_EXTENSION_BACKOFF;
-                    }
-                    _ => {
-                        return Err(
-                            crate::error::LMError::InvalidArpa(
-                                "Expected tab or newline for backoff".to_string()
-                            )
-                        );
-                    }
-                }
-            }
-        }
-
-        // Initialize middle tables for orders 2 to n-1
+        // Allocate middle tables for orders 2 .. total_orders-1
         self.middle.clear();
-        for n in 2..counts.len() {
-            let capacity = ((counts[n - 1] as f32) * config.probing_multiplier) as usize;
-            self.middle.push(MiddleTable::with_capacity(capacity));
+        for n in 2..total_orders {
+            let cap = ((counts[n - 1] as f32) * config.probing_multiplier) as usize;
+            self.middle.push(MiddleTable::with_capacity(cap));
+        }
+        let longest_cap = ((counts[total_orders - 1] as f32) * config.probing_multiplier) as usize;
+        self.longest = LongestTable::with_capacity(longest_cap);
+
+        for n in 2..=total_orders {
+            self.load_order(&mut fp, n, counts[n - 1], total_orders, vocab, &warn)?;
         }
 
-        // Initialize longest table for highest order
-        let longest_capacity = ((counts[counts.len() - 1] as f32) *
-            config.probing_multiplier) as usize;
-        self.longest = LongestTable::with_capacity(longest_capacity);
-
-        // Read n-grams for each order (2-grams, 3-grams, ..., n-grams)
-        for n in 2..=counts.len() {
-            read_ngram_header(&mut file_piece, n as u32)?;
-
-            let count = counts[n - 1];
-            for _ in 0..count {
-                // Read the n-gram manually
-                let prob = file_piece.read_float()?;
-                let prob = if prob > 0.0 {
-                    warn.warn(prob);
-                    0.0
-                } else {
-                    prob
-                };
-
-                // Read n words
-                let mut vocab_ids = vec![0; n];
-                for i in (0..n).rev() {
-                    let word_str = file_piece.read_delimited(&crate::arpa_reader::ARPA_SPACES)?;
-                    let index = vocab.index(&word_str);
-                    vocab_ids[i] = index;
-                }
-
-                // Read backoff if present
-                let mut backoff = crate::constant::K_NO_EXTENSION_BACKOFF;
-                match file_piece.get()? {
-                    '\t' => {
-                        backoff = file_piece.read_float()?;
-                        // Read newline
-                        let nl = file_piece.get()?;
-                        if nl != '\n' && nl != '\r' {
-                            return Err(
-                                crate::error::LMError::InvalidArpa(
-                                    "Expected newline after backoff".to_string()
-                                )
-                            );
-                        }
-                    }
-                    '\n' | '\r' => {}
-                    _ => {
-                        return Err(
-                            crate::error::LMError::InvalidArpa(
-                                "Expected tab or newline for backoff".to_string()
-                            )
-                        );
-                    }
-                }
-
-                let weights = crate::types::ProbBackoff { prob, backoff };
-
-                // Compute hash key from vocab IDs
-                let key = self.compute_hash_key(&vocab_ids);
-
-                // Insert into appropriate table
-                if n == 2 && counts.len() == 2 {
-                    // Bigram model: goes into longest
-                    self.longest.insert(key, weights.prob);
-                } else if n == counts.len() {
-                    // Highest order: goes into longest
-                    self.longest.insert(key, weights.prob);
-                } else {
-                    // Middle orders: goes into middle[n-2]
-                    let table_idx = n - 2;
-                    self.middle[table_idx].insert(key, weights);
-                }
-            }
-        }
-
-        // Read end marker
-        read_end(&mut file_piece)?;
-
-        Ok(())
+        read_end(&mut fp)
     }
 
     fn order(&self) -> u8 {
@@ -403,15 +508,17 @@ impl<V: Value> Search for HashedSearch<V> {
     }
 }
 
-/// Trie-based search implementation
+/// Trie-based search (structure exists; ARPA loading not yet implemented).
 #[derive(Debug)]
 pub struct TrieSearch<Q, B> {
+    unknown_weights: ProbBackoff,
     _phantom: PhantomData<(Q, B)>,
 }
 
 impl<Q: Quantization, B: Bhiksha> Default for TrieSearch<Q, B> {
     fn default() -> Self {
         Self {
+            unknown_weights: ProbBackoff::default(),
             _phantom: PhantomData,
         }
     }
@@ -423,16 +530,16 @@ impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
     type MiddlePointer = TrieMiddlePointer<Q>;
     type LongestPointer = TrieLongestPointer<Q>;
 
-    const K_MODEL_TYPE: u8 = 2; // TRIE
+    const K_MODEL_TYPE: u8 = 2;
     const K_DIFFERENT_REST: bool = false;
     const K_VERSION: u32 = 1;
 
     fn size(_counts: &[u64], _config: &Config) -> u64 {
-        todo!("Trie size calculation")
+        0 // Not yet implemented
     }
 
     fn setup_memory(&mut self, _start: &mut [u8], _counts: &[u64], _config: &Config) -> &mut [u8] {
-        todo!("Trie memory setup")
+        &mut [] // Not yet implemented
     }
 
     fn initialize_from_arpa(
@@ -440,23 +547,26 @@ impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
         _file: &str,
         _counts: &[u64],
         _config: &Config,
-        _vocab: &mut dyn crate::vocabulary::Vocabulary
+        _vocab: &mut dyn crate::vocabulary::Vocabulary,
     ) -> Result<(), crate::error::LMError> {
-        todo!("Trie ARPA loading")
+        Err(crate::error::LMError::LoadError(
+            "TrieSearch: ARPA loading is not yet implemented".into(),
+        ))
     }
 
     fn order(&self) -> u8 {
-        todo!("Trie order")
+        0
     }
 
     fn lookup_unigram(
         &self,
         _word: WordIndex,
         _node: &mut Self::Node,
-        _independent_left: &mut bool,
-        _extend_left: &mut u64
+        independent_left: &mut bool,
+        _extend_left: &mut u64,
     ) -> Self::UnigramPointer {
-        todo!("Trie unigram lookup")
+        *independent_left = true;
+        TrieUnigramPointer(PhantomData)
     }
 
     fn lookup_middle(
@@ -464,31 +574,32 @@ impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
         _order_minus_2: u8,
         _word: WordIndex,
         _node: &mut Self::Node,
-        _independent_left: &mut bool,
-        _extend_left: &mut u64
+        independent_left: &mut bool,
+        _extend_left: &mut u64,
     ) -> Self::MiddlePointer {
-        todo!("Trie middle lookup")
+        *independent_left = true;
+        TrieMiddlePointer(PhantomData)
     }
 
     fn lookup_longest(&self, _word: WordIndex, _node: &Self::Node) -> Self::LongestPointer {
-        todo!("Trie longest lookup")
+        TrieLongestPointer(PhantomData)
     }
 
     fn fast_make_node(&self, _begin: &[WordIndex], _node: &mut Self::Node) -> bool {
-        todo!("Trie fast make node")
+        false
     }
 
     fn unpack(
         &self,
         _extend_pointer: u64,
         _extend_length: u8,
-        _node: &mut Self::Node
+        _node: &mut Self::Node,
     ) -> Self::MiddlePointer {
-        todo!("Trie unpack")
+        TrieMiddlePointer(PhantomData)
     }
 
     fn unknown_unigram(&mut self) -> &mut ProbBackoff {
-        todo!("Trie unknown unigram")
+        &mut self.unknown_weights
     }
 }
 
@@ -663,7 +774,7 @@ pub struct HashedUnigramPointer<V> {
 impl<V: Value> HashedUnigramPointer<V> {
     fn new(prob: f32, backoff: f32, found: bool) -> Self {
         // rest is same as prob if no different rest, otherwise separate
-        let rest = if V::K_DIFFERENT_REST { prob } else { prob };
+        let rest = prob; // rest == prob for now; RestValue will compute differently once trie is wired
         Self {
             prob,
             backoff,
@@ -679,7 +790,8 @@ impl<V> Pointer for HashedUnigramPointer<V> {
         self.found
     }
     fn prob(&self) -> f32 {
-        self.prob
+        // Force sign bit ON so the returned value is always a valid negative log-prob.
+        scoring_prob(self.prob)
     }
     fn backoff(&self) -> f32 {
         self.backoff
@@ -688,7 +800,8 @@ impl<V> Pointer for HashedUnigramPointer<V> {
         self.rest
     }
     fn independent_left(&self) -> bool {
-        true
+        // Sign bit SET on stored prob = no higher-order n-gram uses this as context.
+        is_independent_left(self.prob)
     }
 }
 
@@ -703,7 +816,7 @@ pub struct HashedMiddlePointer<V> {
 
 impl<V: Value> HashedMiddlePointer<V> {
     fn new(prob: f32, backoff: f32, found: bool) -> Self {
-        let rest = if V::K_DIFFERENT_REST { prob } else { prob };
+        let rest = prob; // rest == prob for now; RestValue will compute differently once trie is wired
         Self {
             prob,
             backoff,
@@ -729,13 +842,16 @@ impl<V> Pointer for HashedMiddlePointer<V> {
         self.found
     }
     fn prob(&self) -> f32 {
-        self.prob
+        scoring_prob(self.prob)
     }
     fn backoff(&self) -> f32 {
         self.backoff
     }
     fn rest(&self) -> f32 {
         self.rest
+    }
+    fn independent_left(&self) -> bool {
+        is_independent_left(self.prob)
     }
 }
 
@@ -775,30 +891,18 @@ pub struct TrieMiddlePointer<Q>(PhantomData<Q>);
 pub struct TrieLongestPointer<Q>(PhantomData<Q>);
 
 impl<Q> Pointer for TrieUnigramPointer<Q> {
-    fn found(&self) -> bool {
-        todo!()
-    }
-    fn prob(&self) -> f32 {
-        todo!()
-    }
+    fn found(&self) -> bool { false }
+    fn prob(&self) -> f32 { 0.0 }
 }
 
 impl<Q> Pointer for TrieMiddlePointer<Q> {
-    fn found(&self) -> bool {
-        todo!()
-    }
-    fn prob(&self) -> f32 {
-        todo!()
-    }
+    fn found(&self) -> bool { false }
+    fn prob(&self) -> f32 { 0.0 }
 }
 
 impl<Q> Pointer for TrieLongestPointer<Q> {
-    fn found(&self) -> bool {
-        todo!()
-    }
-    fn prob(&self) -> f32 {
-        todo!()
-    }
+    fn found(&self) -> bool { false }
+    fn prob(&self) -> f32 { 0.0 }
 }
 
 /// Hash function for combining word indices
@@ -811,5 +915,266 @@ fn combine_word_hash(current: u64, next: WordIndex) -> u64 {
 impl Default for TrieNode {
     fn default() -> Self {
         TrieNode
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Config;
+
+    fn default_config() -> Config { Config::new() }
+
+    // ── combine_word_hash ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_combine_word_hash_deterministic() {
+        let h1 = combine_word_hash(123, 456);
+        let h2 = combine_word_hash(123, 456);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_combine_word_hash_different_inputs() {
+        let h1 = combine_word_hash(1, 2);
+        let h2 = combine_word_hash(1, 3);
+        let h3 = combine_word_hash(2, 2);
+        assert_ne!(h1, h2);
+        assert_ne!(h1, h3);
+    }
+
+    // ── HashedSearch ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_hashed_search_default_order() {
+        let s: HashedSearch<BackoffValue> = HashedSearch::default();
+        // Default has empty middle → order = 0 + 2 = 2
+        assert_eq!(s.order(), 2);
+    }
+
+    #[test]
+    fn test_hashed_search_size_calculation() {
+        let counts = vec![100u64, 500u64, 50u64];
+        let config = default_config();
+        let size = HashedSearch::<BackoffValue>::size(&counts, &config);
+        assert!(size > 0);
+    }
+
+    #[test]
+    fn test_hashed_search_setup_memory_updates_order() {
+        let mut s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let counts = vec![5u64, 10u64, 3u64]; // unigrams=5, bigrams=10, trigrams=3
+        let config = default_config();
+        let mut mem: &mut [u8] = &mut [];
+        s.setup_memory(&mut mem, &counts, &config);
+        // middle has 1 entry (order 2 = bigrams), so order = 1 + 2 = 3
+        assert_eq!(s.order(), 3);
+    }
+
+    #[test]
+    fn test_hashed_search_unknown_unigram() {
+        let mut s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let unk = s.unknown_unigram();
+        assert_eq!(unk.prob, 0.0);
+        assert_eq!(unk.backoff, 0.0);
+    }
+
+    #[test]
+    fn test_hashed_search_lookup_unigram_not_found_when_empty() {
+        let s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let mut node = 0u64;
+        let mut independent_left = false;
+        let mut extend_left = 0u64;
+        let ptr = s.lookup_unigram(999, &mut node, &mut independent_left, &mut extend_left);
+        // unigram table is empty → found=false
+        assert!(!ptr.found());
+    }
+
+    #[test]
+    fn test_hashed_search_fast_make_node_empty_returns_false() {
+        let s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let mut node = 0u64;
+        assert!(!s.fast_make_node(&[], &mut node));
+    }
+
+    #[test]
+    fn test_hashed_search_fast_make_node_single_word() {
+        let s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let mut node = 0u64;
+        assert!(s.fast_make_node(&[42], &mut node));
+        assert_eq!(node, 42);
+    }
+
+    #[test]
+    fn test_hashed_search_compute_hash_key_empty() {
+        let s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let key = s.compute_hash_key(&[]);
+        assert_eq!(key, 0);
+    }
+
+    #[test]
+    fn test_hashed_search_compute_hash_key_deterministic() {
+        let s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let k1 = s.compute_hash_key(&[1, 2, 3]);
+        let k2 = s.compute_hash_key(&[1, 2, 3]);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn test_hashed_search_unpack_length1() {
+        let s: HashedSearch<BackoffValue> = HashedSearch::default();
+        let mut node = 0u64;
+        // extend_length=1 means unigram; with empty table, ptr.found() is false
+        let ptr = s.unpack(0, 1, &mut node);
+        assert!(!ptr.found()); // empty table
+    }
+
+    // ── Value marker types ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_backoff_value_constants() {
+        assert_eq!(BackoffValue::K_PROBING_MODEL_TYPE, 0);
+        assert!(!BackoffValue::K_DIFFERENT_REST);
+    }
+
+    #[test]
+    fn test_rest_value_constants() {
+        assert_eq!(RestValue::K_PROBING_MODEL_TYPE, 1);
+        assert!(RestValue::K_DIFFERENT_REST);
+    }
+
+    // ── Pointer trait defaults ────────────────────────────────────────────────
+
+    #[test]
+    fn test_hashed_unigram_pointer_fields() {
+        let ptr: HashedUnigramPointer<BackoffValue> = HashedUnigramPointer::new(-1.5, -0.3, true);
+        assert!(ptr.found());
+        assert!((ptr.prob() - (-1.5)).abs() < 1e-6);
+        assert!((ptr.backoff() - (-0.3)).abs() < 1e-6);
+        assert!(ptr.independent_left());
+    }
+
+    #[test]
+    fn test_hashed_longest_pointer_found_not_found() {
+        let found = HashedLongestPointer::new_found(-2.0);
+        let not_found = HashedLongestPointer::new(-2.0);
+        assert!(found.found());
+        assert!(!not_found.found());
+        assert!((found.prob() - (-2.0)).abs() < 1e-6);
+    }
+
+    // ── Sign-bit encoding ─────────────────────────────────────────────────────
+
+    #[test]
+    fn independent_left_should_be_true_for_negative_stored_prob() {
+        // All log probs start negative → sign bit set → independent by default
+        let ptr: HashedUnigramPointer<BackoffValue> =
+            HashedUnigramPointer::new(-1.5_f32, -0.0_f32, true);
+        assert!(ptr.independent_left());
+    }
+
+    #[test]
+    fn independent_left_should_be_false_after_sign_bit_cleared() {
+        // Simulate a unigram whose prob had its sign bit cleared by mark_extends_left
+        let cleared = mark_extends_left(-1.5_f32);
+        let ptr: HashedUnigramPointer<BackoffValue> =
+            HashedUnigramPointer::new(cleared, -0.0_f32, true);
+        assert!(!ptr.independent_left());
+    }
+
+    #[test]
+    fn prob_should_always_return_negative_for_scoring() {
+        // Even with sign bit cleared, prob() forces sign bit ON
+        let cleared = mark_extends_left(-1.5_f32);
+        let ptr: HashedUnigramPointer<BackoffValue> =
+            HashedUnigramPointer::new(cleared, 0.0_f32, true);
+        assert!(ptr.prob() < 0.0, "scoring prob must be negative");
+        assert!((ptr.prob() - (-1.5_f32)).abs() < 1e-6);
+    }
+
+    // ── ARPA integration smoke test ───────────────────────────────────────────
+
+    #[test]
+    fn scoring_should_use_bigram_when_context_is_available() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        use crate::types::{Config, State};
+        use crate::vocabulary::{ProbingVocabulary, Vocabulary};
+        use crate::model::GenericModel;
+
+        // Trigram ARPA: bigrams go to middle[0], trigrams go to longest.
+        // This lets us verify middle-table lookup works correctly.
+        let arpa = "\
+\\data\\
+ngram 1=3
+ngram 2=1
+ngram 3=1
+
+\\1-grams:
+-99\t<unk>
+-1.5\thello\t-0.3
+-2.0\tworld\t0
+
+\\2-grams:
+-0.8\thello\tworld\t-0.1
+
+\\3-grams:
+-0.5\t<unk>\thello\tworld
+
+\\end\\
+";
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{}", arpa).unwrap();
+        f.flush().unwrap();
+
+        let counts = vec![3u64, 1u64, 1u64];
+        let config = Config::new();
+        let mut vocab = ProbingVocabulary::new();
+        vocab.add_word("<unk>");
+        vocab.add_word("hello");
+        vocab.add_word("world");
+
+        let mut search: HashedSearch<BackoffValue> = HashedSearch::default();
+        search
+            .initialize_from_arpa(
+                f.path().to_str().unwrap(),
+                &counts,
+                &config,
+                &mut vocab,
+            )
+            .unwrap();
+
+        let hello = vocab.index("hello");
+        let world = vocab.index("world");
+
+        let mut node = 0u64;
+        let mut independent_left = false;
+        let mut extend_left = 0u64;
+
+        // Scoring follows the same path as full_score: look up the NEW WORD first (world),
+        // then extend with the CONTEXT word (hello). Keys are built outward from new_word.
+
+        // C++ KenLM clears the sign bit of the NEW WORD (world), not the context (hello).
+        // hello is the CONTEXT of the bigram → only its backoff gets set_extension, not its prob.
+        {
+            let mut dummy_node = 0u64;
+            let mut il = false;
+            let mut el = 0u64;
+            let uni_world_check = search.lookup_unigram(world, &mut dummy_node, &mut il, &mut el);
+            assert!(!uni_world_check.independent_left(), "world is new_word of bigram → must NOT be independent");
+            let uni_hello = search.lookup_unigram(hello, &mut dummy_node, &mut il, &mut el);
+            assert!(uni_hello.independent_left(), "hello is only context, not new_word → must be independent");
+        }
+
+        // Scoring P(world|hello): new_word=world, context=[hello]
+        // 1. lookup_unigram(world) → node = world_id, independent_left=false (world appears as new_word in bigram)
+        let uni_world = search.lookup_unigram(world, &mut node, &mut independent_left, &mut extend_left);
+        assert!(uni_world.found());
+        assert!((uni_world.prob() - (-2.0_f32)).abs() < 0.01, "unigram world prob should be -2.0");
+
+        // 2. lookup_middle(0, hello, node=world) → key = combine(world, hello)
+        let bigram = search.lookup_middle(0, hello, &mut node, &mut independent_left, &mut extend_left);
+        assert!(bigram.found(), "bigram hello→world must be found in middle[0]");
+        assert!((bigram.prob() - (-0.8_f32)).abs() < 0.01, "bigram prob should be -0.8");
     }
 }

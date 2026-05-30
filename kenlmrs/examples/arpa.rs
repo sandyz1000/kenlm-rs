@@ -47,13 +47,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(counts[0], 3, "Expected 3 unigrams");
     assert_eq!(counts[1], 2, "Expected 2 bigrams");
 
-    println!("\n✅ ARPA counts reading test passed!");
+    println!("\nARPA counts reading test passed!");
 
     // Test positive probability warning
     let warn = PositiveProbWarn::new(WarningAction::Silent);
     warn.warn(0.5); // Should not panic with Silent
 
-    println!("✅ Positive probability warning test passed!");
+    println!("Positive probability warning test passed!");
 
     println!("\n🎉 All ARPA reader tests passed!");
     Ok(())

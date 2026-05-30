@@ -1,7 +1,6 @@
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 use std::path::Path;
-use std::str::FromStr;
 
 use crate::error::LMError;
 
@@ -155,17 +154,16 @@ impl FilePiece {
     /// Skip whitespace characters
     fn skip_spaces(&mut self) {
         loop {
-            if self.position >= self.buffer_end {
-                if self.shift().is_err() || self.at_end {
-                    break;
-                }
+            if self.position >= self.buffer_end && (self.shift().is_err() || self.at_end) {
+                break;
             }
-            
+            if self.position >= self.buffer_end {
+                continue;
+            }
             let c = self.buffer[self.position];
             if !c.is_ascii_whitespace() {
                 break;
             }
-            
             self.position += 1;
         }
     }
@@ -173,17 +171,16 @@ impl FilePiece {
     /// Skip characters based on delimiter table
     fn skip_delimiters(&mut self, delimiters: &[bool; 256]) {
         loop {
-            if self.position >= self.buffer_end {
-                if self.shift().is_err() || self.at_end {
-                    break;
-                }
+            if self.position >= self.buffer_end && (self.shift().is_err() || self.at_end) {
+                break;
             }
-            
+            if self.position >= self.buffer_end {
+                continue;
+            }
             let c = self.buffer[self.position];
             if !delimiters[c as usize] {
                 break;
             }
-            
             self.position += 1;
         }
     }
@@ -283,5 +280,99 @@ mod tests {
         assert_eq!(fp.read_line('\n', false).unwrap(), "line1");
         assert_eq!(fp.read_line('\n', false).unwrap(), "line2");
         assert_eq!(fp.read_line('\n', false).unwrap(), "line3");
+    }
+
+    fn make_fp(content: &str) -> (NamedTempFile, FilePiece) {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(f, "{}", content).unwrap();
+        f.flush().unwrap();
+        let path = f.path().to_owned();
+        let fp = FilePiece::open(&path).unwrap();
+        (f, fp)
+    }
+
+    #[test]
+    fn test_file_name_is_set() {
+        let (_f, fp) = make_fp("hello");
+        assert!(!fp.file_name().is_empty());
+    }
+
+    #[test]
+    fn test_get_and_peek() {
+        let (_f, mut fp) = make_fp("AB");
+        assert_eq!(fp.peek().unwrap(), 'A');
+        assert_eq!(fp.get().unwrap(), 'A');
+        assert_eq!(fp.peek().unwrap(), 'B');
+        assert_eq!(fp.get().unwrap(), 'B');
+    }
+
+    #[test]
+    fn test_read_float_negative() {
+        let (_f, mut fp) = make_fp("-3.14");
+        let v = fp.read_float().unwrap();
+        assert!((v - (-3.14)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_read_float_with_leading_spaces() {
+        let (_f, mut fp) = make_fp("  42.0  ");
+        let v = fp.read_float().unwrap();
+        assert!((v - 42.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_read_delimited() {
+        let delims = {
+            let mut d = [false; 256];
+            d[b' ' as usize] = true;
+            d[b'\t' as usize] = true;
+            d[b'\n' as usize] = true;
+            d
+        };
+        let (_f, mut fp) = make_fp("hello world");
+        let token = fp.read_delimited(&delims).unwrap();
+        assert_eq!(token, "hello");
+    }
+
+    #[test]
+    fn test_read_multiple_delimited_tokens() {
+        let delims = {
+            let mut d = [false; 256];
+            d[b' ' as usize] = true;
+            d[b'\t' as usize] = true;
+            d[b'\n' as usize] = true;
+            d
+        };
+        let (_f, mut fp) = make_fp("foo bar baz");
+        assert_eq!(fp.read_delimited(&delims).unwrap(), "foo");
+        assert_eq!(fp.read_delimited(&delims).unwrap(), "bar");
+        assert_eq!(fp.read_delimited(&delims).unwrap(), "baz");
+    }
+
+    #[test]
+    fn test_read_line_strips_cr() {
+        let (_f, mut fp) = make_fp("line1\r\nline2\r\n");
+        let line = fp.read_line('\n', true).unwrap();
+        assert_eq!(line, "line1"); // \r stripped
+    }
+
+    #[test]
+    fn test_at_end_false_at_start() {
+        let (_f, fp) = make_fp("data");
+        assert!(!fp.at_end());
+    }
+
+    #[test]
+    fn test_read_double() {
+        let (_f, mut fp) = make_fp("1.23456789");
+        let v = fp.read_double().unwrap();
+        assert!((v - 1.23456789).abs() < 1e-7);
+    }
+
+    #[test]
+    fn test_read_ulong() {
+        let (_f, mut fp) = make_fp("12345678");
+        let v = fp.read_ulong().unwrap();
+        assert_eq!(v, 12345678);
     }
 }

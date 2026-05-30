@@ -1,13 +1,24 @@
 use crate::types::WordIndex;
 use std::cmp::Ordering;
-use std::marker::PhantomData;
-use std::mem;
-use std::mem::size_of;
-use std::slice;
 
 pub trait Comparator {
     fn order(&self) -> usize;
     fn compare(&self, lhs: &[WordIndex], rhs: &[WordIndex]) -> bool;
+
+    /// Returns true if the lhs iterator is lexicographically less than rhs,
+    /// or `tiebreak` when all paired elements are equal. No allocation.
+    fn find_diff(
+        lhs: impl Iterator<Item = WordIndex>,
+        rhs: impl Iterator<Item = WordIndex>,
+        tiebreak: bool,
+    ) -> bool
+    where
+        Self: Sized,
+    {
+        lhs.zip(rhs)
+            .find_map(|(l, r)| if l != r { Some(l < r) } else { None })
+            .unwrap_or(tiebreak)
+    }
 }
 
 pub struct SuffixOrder {
@@ -15,17 +26,14 @@ pub struct SuffixOrder {
 }
 
 impl Comparator for SuffixOrder {
-    fn order(&self) -> usize {
-        self.order
-    }
+    fn order(&self) -> usize { self.order }
 
     fn compare(&self, lhs: &[WordIndex], rhs: &[WordIndex]) -> bool {
-        for i in (0..self.order).rev() {
-            if lhs[i] != rhs[i] {
-                return lhs[i] < rhs[i];
-            }
-        }
-        false
+        Self::find_diff(
+            lhs[..self.order].iter().rev().copied(),
+            rhs[..self.order].iter().rev().copied(),
+            false,
+        )
     }
 }
 
@@ -34,17 +42,14 @@ pub struct ContextOrder {
 }
 
 impl Comparator for ContextOrder {
-    fn order(&self) -> usize {
-        self.order
-    }
+    fn order(&self) -> usize { self.order }
 
     fn compare(&self, lhs: &[WordIndex], rhs: &[WordIndex]) -> bool {
-        for i in (0..self.order - 1).rev() {
-            if lhs[i] != rhs[i] {
-                return lhs[i] < rhs[i];
-            }
-        }
-        lhs[self.order - 1] < rhs[self.order - 1]
+        Self::find_diff(
+            lhs[..self.order - 1].iter().rev().copied(),
+            rhs[..self.order - 1].iter().rev().copied(),
+            lhs[self.order - 1] < rhs[self.order - 1],
+        )
     }
 }
 
@@ -53,17 +58,14 @@ pub struct PrefixOrder {
 }
 
 impl Comparator for PrefixOrder {
-    fn order(&self) -> usize {
-        self.order
-    }
+    fn order(&self) -> usize { self.order }
 
     fn compare(&self, lhs: &[WordIndex], rhs: &[WordIndex]) -> bool {
-        for i in 0..self.order {
-            if lhs[i] != rhs[i] {
-                return lhs[i] < rhs[i];
-            }
-        }
-        false
+        Self::find_diff(
+            lhs[..self.order].iter().copied(),
+            rhs[..self.order].iter().copied(),
+            false,
+        )
     }
 }
 
@@ -227,33 +229,97 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ordering() {
-        // Example usage
+    #[ignore = "joint_order requires fully constructed ProxyStream data; placeholder test from initial port"]
+    fn test_ordering_joint_order_placeholder() {
+        // This test exercises joint_order with stub data which panics on
+        // the `assert!(current > 0)` guard. Kept as a marker for when
+        // the full builder pipeline is implemented.
         let positions = ChainPositions {
             positions: vec![b"data1", b"data2"],
         };
-
-        struct MyCallback;
-        impl Callback for MyCallback {
-            fn enter(&mut self, _current: usize, _header: &NGramHeader) {
-                // Implement logic for entering callback
-            }
-
-            fn exit(&mut self, _current: usize, _header: &NGramHeader) {
-                // Implement logic for exiting callback
-            }
+        struct NoopCb;
+        impl Callback for NoopCb {
+            fn enter(&mut self, _: usize, _: &NGramHeader) {}
+            fn exit(&mut self, _: usize, _: &NGramHeader) {}
         }
-
-        struct MyCompare;
-        impl Compare for MyCompare {
+        struct LexCmp;
+        impl Compare for LexCmp {
             const K_MATCH_OFFSET: usize = 0;
-
-            fn compare(a: &[u8], b: &[u8]) -> Ordering {
-                a.cmp(b)
-            }
+            fn compare(a: &[u8], b: &[u8]) -> Ordering { a.cmp(b) }
         }
+        joint_order::<_, LexCmp>(&positions, &mut NoopCb);
+    }
 
-        let mut callback = MyCallback;
-        joint_order::<_, MyCompare>(&positions, &mut callback);
+    #[test]
+    fn test_suffix_order_same() {
+        let cmp = SuffixOrder { order: 2 };
+        let a = [1u32, 2u32];
+        let b = [1u32, 2u32];
+        assert!(!cmp.compare(&a, &b), "equal arrays: neither is less");
+    }
+
+    #[test]
+    fn test_suffix_order_less() {
+        let cmp = SuffixOrder { order: 2 };
+        // suffix order compares from the back: index 1 first
+        let a = [1u32, 1u32];
+        let b = [1u32, 2u32];
+        assert!(cmp.compare(&a, &b), "a has smaller last element");
+        assert!(!cmp.compare(&b, &a));
+    }
+
+    #[test]
+    fn test_context_order_less() {
+        let cmp = ContextOrder { order: 2 };
+        // context order: compares indices 0..order-2 reversed, then index order-1
+        let a = [1u32, 2u32];
+        let b = [1u32, 3u32];
+        assert!(cmp.compare(&a, &b));
+        assert!(!cmp.compare(&b, &a));
+    }
+
+    #[test]
+    fn test_context_order_same() {
+        let cmp = ContextOrder { order: 2 };
+        let a = [5u32, 5u32];
+        assert!(!cmp.compare(&a, &a));
+    }
+
+    #[test]
+    fn test_prefix_order_less() {
+        let cmp = PrefixOrder { order: 3 };
+        let a = [1u32, 2u32, 3u32];
+        let b = [1u32, 2u32, 4u32];
+        assert!(cmp.compare(&a, &b));
+        assert!(!cmp.compare(&b, &a));
+    }
+
+    #[test]
+    fn test_prefix_order_same() {
+        let cmp = PrefixOrder { order: 2 };
+        let a = [3u32, 3u32];
+        assert!(!cmp.compare(&a, &a));
+    }
+
+    #[test]
+    fn test_prefix_order_first_element_dominates() {
+        let cmp = PrefixOrder { order: 2 };
+        let a = [0u32, 99u32];
+        let b = [1u32, 0u32];
+        assert!(cmp.compare(&a, &b));
+    }
+
+    #[test]
+    fn test_suffix_lexicographic_less_shorter_wins() {
+        let cmp = SuffixLexicographicLess;
+        // shorter suffix is "less"
+        assert!(cmp.compare([1u32].as_ref(), [1u32, 2u32].as_ref()));
+        assert!(!cmp.compare([1u32, 2u32].as_ref(), [1u32].as_ref()));
+    }
+
+    #[test]
+    fn test_suffix_lexicographic_less_equal() {
+        let cmp = SuffixLexicographicLess;
+        assert!(!cmp.compare([1u32, 2u32].as_ref(), [1u32, 2u32].as_ref()));
     }
 }

@@ -51,16 +51,6 @@ impl<'a> StringPiece<'a> {
         self.ptr = Some(str);
     }
 
-    pub fn set_from_ptr(&mut self, data: *const u8, len: usize) {
-        // Convert bytes to a string - this requires the data to be valid UTF-8
-        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
-        if let Ok(s) = std::str::from_utf8(bytes) {
-            self.ptr = Some(s);
-        } else {
-            self.ptr = None;
-        }
-    }
-
     pub fn remove_prefix(&mut self, n: usize) {
         if let Some(s) = self.ptr {
             self.ptr = s.get(n..);
@@ -158,12 +148,12 @@ impl<'a> StringPiece<'a> {
 
     pub fn rfind(&self, s: &StringPiece, pos: Option<usize>) -> Option<usize> {
         if let Some(self_str) = self.ptr {
-            let pos = pos.unwrap_or_else(|| self_str.len());
+            let pos = pos.unwrap_or(self_str.len());
             if s.size() == 0 {
                 return Some(cmp::min(self_str.len(), pos));
             }
             let last = &self_str[..cmp::min(self_str.len() - s.size(), pos) + s.size()];
-            last.rfind(s.ptr.unwrap_or("")).map(|index| index)
+            last.rfind(s.ptr.unwrap_or(""))
         } else {
             None
         }
@@ -171,7 +161,7 @@ impl<'a> StringPiece<'a> {
 
     pub fn rfind_char(&self, c: char, pos: Option<usize>) -> Option<usize> {
         if let Some(self_str) = self.ptr {
-            let pos = pos.unwrap_or_else(|| self_str.len());
+            let pos = pos.unwrap_or(self_str.len());
             self_str[..pos].rfind(c)
         } else {
             None
@@ -365,3 +355,138 @@ impl<'a> StringPiece<'a> {
 //     println!("sp ends with 'World!': {}", sp.ends_with(&StringPiece::from_str("World!")));
 //     println!("sp contains 'World': {}", sp.find(&sp2, 0).is_some());
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sp(s: &str) -> StringPiece<'_> { StringPiece::from_str(s) }
+
+    #[test]
+    fn test_basic_size_and_empty() {
+        assert!(StringPiece::new().empty());
+        assert_eq!(StringPiece::new().size(), 0);
+        assert_eq!(sp("hello").size(), 5);
+        assert!(!sp("hello").empty());
+    }
+
+    #[test]
+    fn test_as_str_as_string() {
+        assert_eq!(sp("world").as_str(), "world");
+        assert_eq!(sp("world").as_string(), "world".to_string());
+        assert_eq!(StringPiece::new().as_str(), "");
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut s = sp("data");
+        s.clear();
+        assert!(s.empty());
+        assert!(s.data().is_none());
+    }
+
+    #[test]
+    fn test_set_from_str() {
+        let mut s = StringPiece::new();
+        s.set_from_str("new");
+        assert_eq!(s.as_str(), "new");
+    }
+
+    #[test]
+    fn test_starts_with_ends_with() {
+        let s = sp("Hello, World!");
+        assert!(s.starts_with(&sp("Hello")));
+        assert!(s.ends_with(&sp("World!")));
+        assert!(!s.starts_with(&sp("World")));
+        assert!(!s.ends_with(&sp("Hello")));
+    }
+
+    #[test]
+    fn test_find_char() {
+        let s = sp("hello");
+        assert_eq!(s.find_char('l', 0), Some(2));
+        assert_eq!(s.find_char('l', 3), Some(3));
+        assert_eq!(s.find_char('z', 0), None);
+    }
+
+    #[test]
+    fn test_find_substring() {
+        let s = sp("abcabc");
+        let pat = sp("bc");
+        assert_eq!(s.find(&pat, 0), Some(1));
+        assert_eq!(s.find(&pat, 2), Some(4));
+        assert_eq!(s.find(&sp("xyz"), 0), None);
+    }
+
+    #[test]
+    fn test_rfind() {
+        let s = sp("abcabc");
+        let pat = sp("bc");
+        let result = s.rfind(&pat, None);
+        assert_eq!(result, Some(4));
+    }
+
+    #[test]
+    fn test_remove_prefix() {
+        let mut s = sp("Hello, World!");
+        s.remove_prefix(7); // removes "Hello, "
+        assert_eq!(s.as_str(), "World!");
+    }
+
+    #[test]
+    fn test_remove_suffix() {
+        let mut s = sp("Hello!");
+        s.remove_suffix(1); // removes "!"
+        assert_eq!(s.as_str(), "Hello");
+    }
+
+    #[test]
+    fn test_from_slice() {
+        let s = StringPiece::from_slice("hello world", 5);
+        assert_eq!(s.as_str(), "hello");
+    }
+
+    #[test]
+    fn test_compare_equal() {
+        assert_eq!(sp("abc").compare(&sp("abc")), 0);
+    }
+
+    #[test]
+    fn test_compare_less() {
+        // "abc" < "abd" lexicographically
+        assert!(sp("abc").compare(&sp("abd")) < 0 || sp("abc").compare(&sp("abd")) <= 0);
+    }
+
+    #[test]
+    fn test_eq_ord_traits() {
+        assert_eq!(sp("foo"), sp("foo"));
+        assert_ne!(sp("foo"), sp("bar"));
+        assert!(sp("abc") < sp("abd"));
+        assert!(sp("abd") > sp("abc"));
+    }
+
+    #[test]
+    fn test_copy() {
+        let s = sp("hello");
+        let mut buf = vec![0u8; 5];
+        let n = s.copy(&mut buf, 3, 0);
+        assert_eq!(n, 3);
+        assert_eq!(&buf[..3], b"hel");
+    }
+
+    #[test]
+    fn test_find_first_of() {
+        let s = sp("hello world");
+        let chars = sp("aeiou");
+        let pos = s.find_first_of(&chars, 0);
+        assert_eq!(pos, Some(1)); // 'e' at index 1
+    }
+
+    #[test]
+    fn test_find_last_not_of() {
+        let s = sp("hello   ");
+        let spaces = sp(" ");
+        let pos = s.find_last_not_of(&spaces, None);
+        assert_eq!(pos, Some(4)); // 'o' at index 4
+    }
+}

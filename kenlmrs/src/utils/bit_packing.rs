@@ -3,6 +3,12 @@
 /// WARNING: The write functions assume that memory is zero initially.
 /// This makes them faster and is the appropriate case for mmapped language model construction.
 
+/// Returns a bitmask of `bits` ones. Returns 0 for bits == 0.
+#[inline]
+pub(crate) fn mask_for_bits(bits: u8) -> u64 {
+    if bits > 0 { (1u64 << bits) - 1 } else { 0 }
+}
+
 /// Determine byte order at compile time
 #[cfg(target_endian = "little")]
 #[inline]
@@ -135,26 +141,16 @@ pub struct BitsMask {
 impl BitsMask {
     pub fn by_max(max_value: u64) -> Self {
         let bits = required_bits(max_value);
-        Self {
-            bits,
-            mask: if bits > 0 { (1u64 << bits) - 1 } else { 0 },
-        }
+        Self { bits, mask: mask_for_bits(bits) }
     }
 
     pub fn by_bits(bits: u8) -> Self {
-        Self {
-            bits,
-            mask: if bits > 0 { (1u64 << bits) - 1 } else { 0 },
-        }
+        Self { bits, mask: mask_for_bits(bits) }
     }
 
     pub fn from_max(&mut self, max_value: u64) {
         self.bits = required_bits(max_value);
-        self.mask = if self.bits > 0 {
-            (1u64 << self.bits) - 1
-        } else {
-            0
-        };
+        self.mask = mask_for_bits(self.bits);
     }
 }
 
@@ -206,5 +202,112 @@ mod tests {
         write_float32(&mut buffer, 0, value);
         let read_value = read_float32(&buffer, 0);
         assert!((read_value - value).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_required_bits_edge_cases() {
+        assert_eq!(required_bits(0), 0);
+        assert_eq!(required_bits(1), 1);
+        assert_eq!(required_bits(2), 2);  // 2 = 0b10 → 2 bits
+        assert_eq!(required_bits(3), 2);  // 3 = 0b11 → 2 bits
+        assert_eq!(required_bits(4), 3);  // 4 = 0b100 → 3 bits
+        assert_eq!(required_bits(7), 3);
+        assert_eq!(required_bits(8), 4);
+        assert_eq!(required_bits(65535), 16);
+        assert_eq!(required_bits(u32::MAX as u64), 32);
+    }
+
+    #[test]
+    fn test_read_write_int57_roundtrip_zero() {
+        let mut buf = vec![0u8; 16];
+        write_int57(&mut buf, 0, 8, 0);
+        assert_eq!(read_int57(&buf, 0, 8, 0xFF), 0);
+    }
+
+    #[test]
+    fn test_read_write_int57_at_bit_offset() {
+        // Write at bit offset 8 (second byte)
+        let mut buf = vec![0u8; 16];
+        write_int57(&mut buf, 8, 8, 200);
+        assert_eq!(read_int57(&buf, 8, 8, 0xFF), 200);
+        // First byte is unaffected
+        assert_eq!(read_int57(&buf, 0, 8, 0xFF), 0);
+    }
+
+    #[test]
+    fn test_read_write_int57_arbitrary_bit_offset() {
+        let mut buf = vec![0u8; 16];
+        // Pack at bit 3, length 10
+        let mask = (1u64 << 10) - 1;
+        write_int57(&mut buf, 3, 10, 777);
+        let result = read_int57(&buf, 3, 10, mask);
+        assert_eq!(result, 777);
+    }
+
+    #[test]
+    fn test_read_write_int57_multiple_values() {
+        let mut buf = vec![0u8; 32];
+        // Two 8-bit values side by side
+        write_int57(&mut buf, 0, 8, 0xAB);
+        write_int57(&mut buf, 8, 8, 0xCD);
+        assert_eq!(read_int57(&buf, 0, 8, 0xFF), 0xAB);
+        assert_eq!(read_int57(&buf, 8, 8, 0xFF), 0xCD);
+    }
+
+    #[test]
+    fn test_read_write_non_positive_float31() {
+        let mut buf = vec![0u8; 16];
+        let values = [-0.0f32, -1.5, -0.001, -999.9];
+        for &v in &values {
+            buf.fill(0);
+            write_non_positive_float31(&mut buf, 0, v);
+            let result = read_non_positive_float31(&buf, 0);
+            // Non-positive floats stored in 31 bits should round-trip accurately
+            assert!((result - v).abs() < 1e-3, "value={} result={}", v, result);
+            assert!(result <= 0.0, "result must be non-positive");
+        }
+    }
+
+    #[test]
+    fn test_float32_roundtrip_negative() {
+        let mut buf = vec![0u8; 16];
+        let values = [-1.0f32, -0.5, -100.0, -0.0001];
+        for &v in &values {
+            buf.fill(0);
+            write_float32(&mut buf, 0, v);
+            let result = read_float32(&buf, 0);
+            assert!((result - v).abs() < 1e-6, "v={} result={}", v, result);
+        }
+    }
+
+    #[test]
+    fn test_bits_mask_by_bits() {
+        let m = BitsMask::by_bits(4);
+        assert_eq!(m.bits, 4);
+        assert_eq!(m.mask, 0b1111);
+        let m0 = BitsMask::by_bits(0);
+        assert_eq!(m0.mask, 0);
+    }
+
+    #[test]
+    fn test_bits_mask_from_max() {
+        let mut m = BitsMask::default();
+        m.from_max(255);
+        assert_eq!(m.bits, 8);
+        assert_eq!(m.mask, 255);
+    }
+
+    #[test]
+    fn test_bit_address_construction() {
+        let addr = BitAddress::new(vec![0u8; 8], 16);
+        assert_eq!(addr.offset, 16);
+        assert_eq!(addr.base.len(), 8);
+    }
+
+    #[test]
+    fn test_read_write_int25_basic() {
+        let mut buf = vec![0u8; 8];
+        write_int25(&mut buf, 0, 8, 0xAB);
+        assert_eq!(read_int25(&buf, 0, 8, 0xFF), 0xAB);
     }
 }

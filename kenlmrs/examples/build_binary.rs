@@ -1,7 +1,7 @@
 /// Build binary example - similar to KenLM's build_binary_main.cc
 /// This demonstrates building a binary language model from ARPA format
 use kenlmrs::arpa::read_arpa_counts;
-use kenlmrs::types::{ Config, ModelType, LoadMethod };
+use kenlmrs::types::{Config, LoadMethod, ModelType};
 use kenlmrs::utils::pieces::file::FilePiece;
 use std::fs::File;
 use std::io::Write;
@@ -25,7 +25,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Build configuration:");
     println!("  Probing multiplier: {}", config.probing_multiplier);
-    println!("  Unknown missing log prob: {}", config.unknown_missing_logprob);
+    println!(
+        "  Unknown missing log prob: {}",
+        config.unknown_missing_logprob
+    );
     println!("  Building memory: {} bytes", config.building_memory);
     println!();
 
@@ -52,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_type = ModelType::Probing;
     estimate_memory_usage(&counts, model_type, &config);
 
-    println!("\n✅ Build binary example completed!");
+    println!("\nBuild binary example completed!");
     println!("\nNote: Full binary building requires implementing:");
     println!("  - Vocabulary building from ARPA");
     println!("  - Trie/Hash table construction");
@@ -163,6 +166,11 @@ fn estimate_memory_usage(counts: &[u64], model_type: ModelType, config: &Config)
             _ => 8,
         };
         let order_memory = count * bytes_per_entry;
-        println!("  {}-grams: {} entries, ~{} KB", order + 1, count, order_memory / 1024);
+        println!(
+            "  {}-grams: {} entries, ~{} KB",
+            order + 1,
+            count,
+            order_memory / 1024
+        );
     }
 }

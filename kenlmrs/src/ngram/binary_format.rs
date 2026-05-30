@@ -1,9 +1,8 @@
-use crate::constant::{BINARY_MAGIC, MODEL_VERSION};
+use crate::constant::BINARY_MAGIC;
 use crate::error::LMError;
-use crate::types::{Config, ModelType};
+use crate::types::ModelType;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::mem;
 use std::path::Path;
 
 /// Model type names for error messages
