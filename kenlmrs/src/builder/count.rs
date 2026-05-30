@@ -193,19 +193,3 @@ struct ChainPosition {
     // Fields for ChainPosition
 }
 
-#[derive(Debug, Clone)]
-pub struct CombineCounts;
-
-impl CombineCounts {
-    fn combine(
-        &self,
-        _first_void: *mut u8,
-        _second_void: *const u8,
-        _compare: &SuffixOrder
-    ) -> bool {
-        // TODO: This function needs proper implementation with correct type conversions
-        // The challenge is converting raw byte pointers to NGram structures
-        // For now, return false as a placeholder
-        unimplemented!("CombineCounts::combine needs proper NGram pointer handling")
-    }
-}

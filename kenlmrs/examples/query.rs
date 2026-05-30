@@ -7,7 +7,7 @@ use clap::Parser;
 use kenlmrs::model::ProbingModel;
 use kenlmrs::types::{Config, State};
 use kenlmrs::vocabulary::Vocabulary;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, BufWriter, Write};
 
 #[derive(Parser)]
 #[command(name = "query", about = "Score sentences from stdin using a KenLM ARPA model")]
@@ -27,19 +27,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = ProbingModel::new(&args.model, &Config::default())?;
     eprintln!("Model loaded (order {})", model.order());
 
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let sentence = line?;
         if sentence.trim().is_empty() {
             continue;
         }
-        score_sentence(&model, &sentence, args.sentence_context);
+        score_sentence(&model, &sentence, args.sentence_context, &mut out)?;
     }
 
     Ok(())
 }
 
-fn score_sentence(model: &ProbingModel, sentence: &str, sentence_context: bool) {
+fn score_sentence(
+    model: &ProbingModel,
+    sentence: &str,
+    sentence_context: bool,
+    out: &mut impl Write,
+) -> Result<(), io::Error> {
     let vocab = model.vocab();
     let mut state = if sentence_context {
         model.begin_sentence_state()
@@ -57,24 +65,23 @@ fn score_sentence(model: &ProbingModel, sentence: &str, sentence_context: bool) 
             oov += 1;
         }
 
-        let mut out = State::default();
-        let ret = model.full_score(&state, idx, &mut out);
-        println!("p={:.6} [{}] {}", ret.prob, ret.ngram_length, word);
+        let mut next = State::default();
+        let ret = model.full_score(&state, idx, &mut next);
+        writeln!(out, "p={:.6} [{}] {}", ret.prob, ret.ngram_length, word)?;
 
         total += ret.prob;
         token_count += 1;
-        state = out;
+        state = next;
     }
 
-    // Score end-of-sentence marker
     if sentence_context {
         let eos = vocab.end_sentence();
-        let mut out = State::default();
-        let ret = model.full_score(&state, eos, &mut out);
-        println!("p={:.6} [{}] </s>", ret.prob, ret.ngram_length);
+        let mut next = State::default();
+        let ret = model.full_score(&state, eos, &mut next);
+        writeln!(out, "p={:.6} [{}] </s>", ret.prob, ret.ngram_length)?;
         total += ret.prob;
         token_count += 1;
     }
 
-    println!("Total: {:.6} OOV: {} Tokens: {}", total, oov, token_count);
+    writeln!(out, "Total: {:.6} OOV: {} Tokens: {}", total, oov, token_count)
 }

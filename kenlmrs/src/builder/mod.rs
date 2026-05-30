@@ -43,9 +43,6 @@ impl HeaderInfo {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct OutputHook;
-
 #[derive(Copy, Clone, Debug)]
 struct Uninterpolated {
     prob: f32, // Uninterpolated probability

@@ -1,28 +1,15 @@
 use crate::constant::{FilterMode, FormatEnum};
 use crate::utils::pieces::file::FilePiece;
-use crate::utils::pieces::string::StringPiece;
-use std::collections::HashSet;
 use std::process::Output;
-
-// Placeholder types
-pub struct Words;
-pub struct IStream;
-
-#[derive(Debug)]
-pub enum FilterType {
-    Threaded,
-    Context,
-    Binary,
-}
 
 #[derive(Debug)]
 pub(crate) struct Config {
-    batch_size: i32, // 25000
+    batch_size: i32,
     threads: i8,
-    mode: FilterMode,   // MODE_COPY
-    phrase: bool,       // False
-    context: bool,      // False
-    format: FormatEnum, // FORMAT_ARPA
+    mode: FilterMode,
+    phrase: bool,
+    context: bool,
+    format: FormatEnum,
 }
 
 impl Default for Config {
@@ -38,72 +25,15 @@ impl Default for Config {
     }
 }
 
-pub(crate) fn RunThreadedFilter<FilterType, Format, OutputBuffer, F: Filter>(
+pub(crate) trait Filter {
+    fn filter_ngram(&self, ngram: &str) -> bool;
+}
+
+pub(crate) fn run_threaded_filter<F: Filter>(
     _config: &Config,
     _in_lm: &FilePiece,
-    _filter_: &F,
+    _filter: &F,
     _output: Output,
 ) {
     // TODO: Implement threaded filtering
-}
-
-#[derive(Debug, Clone)]
-pub struct PhraseFilter;
-
-#[derive(Debug, Clone)]
-pub struct VocabFilter;
-
-trait Filter {
-    fn new() -> Self;
-}
-
-impl Filter for PhraseFilter {
-    fn new() -> Self {
-        PhraseFilter
-    }
-}
-
-impl Filter for VocabFilter {
-    fn new() -> Self {
-        VocabFilter
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Substrings;
-
-#[derive(Debug, Clone)]
-pub struct Multiple;
-
-#[derive(Debug, Clone)]
-pub struct Union;
-
-impl Union {
-    fn new(self, _vocabs: &Words) -> Self {
-        // TODO: Implement Union constructor
-        Self
-    }
-}
-
-impl Multiple {
-    fn AddNGram<I>(
-        &self,
-        _begin: &I,
-        _end: &I,
-        _ngram: &StringPiece,
-        _line: &StringPiece,
-        _output: &Output,
-    ) where I: Iterator {
-        // TODO: Implement AddNGram
-        todo!()
-    }
-}
-
-pub fn read_single(_in_: IStream, _out: &HashSet<String>) {
-    // TODO: Implement ReadSingle
-}
-
-pub fn read_multiple(_in_: IStream, _out_: Substrings) -> i64 {
-    // TODO: Implement ReadMultiple
-    0
 }

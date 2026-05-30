@@ -1,14 +1,6 @@
 use crate::model::Model;
 use std::io::Write;
 
-#[derive(Debug)]
-pub struct BenchmarkConfig;
-
-
-pub fn query_from_bytes<M: Model>(model: &M, config: BenchmarkConfig, Width: i8) {
-    todo!()
-}
-
 pub fn convert_to_bytes<M: Model>(model: &M, fd_in: i64, width: i8) {
     todo!()
 }
