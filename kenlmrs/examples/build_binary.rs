@@ -1,6 +1,6 @@
 /// Build binary example - similar to KenLM's build_binary_main.cc
 /// This demonstrates building a binary language model from ARPA format
-use kenlmrs::arpa::read_arpa_counts;
+use kenlmrs::arpa_reader::read_arpa_counts;
 use kenlmrs::types::{Config, LoadMethod, ModelType};
 use kenlmrs::utils::pieces::file::FilePiece;
 use std::fs::File;

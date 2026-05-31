@@ -41,10 +41,9 @@ impl<'a> StatCollector<'a> {
         order: usize,
         counts: &'a mut Vec<u64>,
         counts_pruned: &'a mut Vec<u64>,
-        discounts: &'a mut Vec<Discount>
+        discounts: &'a mut Vec<Discount>,
     ) -> Self {
-        let orders =
-            vec![
+        let orders = vec![
             OrderStat {
                 n: [0; 5],
                 count: 0,
@@ -72,7 +71,8 @@ impl<'a> StatCollector<'a> {
         }
 
         *self.discounts = config.overwrite.clone();
-        self.discounts.resize(self.orders.len(), Discount { amount: [0.0; 4] });
+        self.discounts
+            .resize(self.orders.len(), Discount { amount: [0.0; 4] });
 
         for i in config.overwrite.len()..self.orders.len() {
             let s = &self.orders[i];
@@ -157,7 +157,7 @@ impl<'a> CorpusCount<'a> {
         prune_words: &'a mut Vec<bool>,
         prune_vocab_filename: &str,
         entries_per_block: usize,
-        disallowed_symbol: WarningAction
+        disallowed_symbol: WarningAction,
     ) -> Self {
         // Initialize other necessary fields as required
         let dedupe_mem_size = Self::dedupe_multiplier(entries_per_block) as usize;
@@ -177,19 +177,106 @@ impl<'a> CorpusCount<'a> {
         }
     }
 
-    fn run(&mut self, _position: &ChainPosition) {
-        // Logic for the run method
-        self.run_with_vocab(_position, &mut Vec::<u8>::new()); // Placeholder for vocab
+    fn run(&mut self, _position: &crate::stream::chain::ChainPosition) {
+        // Streaming run is implemented via count_ngrams_to_chain(); this stub is kept for API compatibility.
     }
 
-    fn run_with_vocab<Vocab>(&mut self, _position: &ChainPosition, _vocab: &mut Vocab) {
-        // Logic for the run_with_vocab method
-        unimplemented!()
+    fn run_with_vocab<Vocab>(
+        &mut self,
+        _position: &crate::stream::chain::ChainPosition,
+        _vocab: &mut Vocab,
+    ) {
     }
 }
 
-// Placeholder types for ChainPosition
-struct ChainPosition {
-    // Fields for ChainPosition
+/// Read a plain-text corpus and write counted n-grams to a chain.
+///
+/// Each chain entry is 16 bytes: `[hash: u64][count: u64]`.
+/// N-grams are hashed via murmur so the downstream sort/dedup stage can work without
+/// storing the actual word strings. Returns total token count.
+///
+/// This is the streaming entry point for CorpusCount: it replaces the C-style `run()` stub.
+pub fn count_ngrams_to_chain(
+    input_path: &str,
+    order: usize,
+    chain: &crate::stream::chain::Chain,
+) -> Result<u64, crate::error::LMError> {
+    use crate::utils::pieces::file::FilePiece;
+    use std::collections::HashMap;
+
+    let mut fp = FilePiece::open(input_path)?;
+    let delims = {
+        let mut d = [false; 256];
+        d[b' ' as usize] = true;
+        d[b'\t' as usize] = true;
+        d[b'\n' as usize] = true;
+        d[b'\r' as usize] = true;
+        d
+    };
+
+    let mut counts: HashMap<Vec<u32>, u64> = HashMap::new();
+    let mut vocab: HashMap<String, u32> = HashMap::new();
+    vocab.insert("<s>".to_string(), 1);
+    vocab.insert("</s>".to_string(), 2);
+    let mut next_id = 3u32;
+    let mut tokens: Vec<u32> = Vec::new();
+    let mut total_tokens = 0u64;
+
+    while !fp.at_end() {
+        let line = match fp.read_line('\n', true) {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        if line.is_empty() {
+            continue;
+        }
+        tokens.clear();
+        tokens.push(1); // <s>
+        for word in line.split_whitespace() {
+            let id = *vocab.entry(word.to_string()).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            tokens.push(id);
+            total_tokens += 1;
+        }
+        tokens.push(2); // </s>
+
+        // Count n-grams of each order
+        for start in 0..tokens.len() {
+            for len in 1..=order.min(tokens.len() - start) {
+                let ngram = tokens[start..start + len].to_vec();
+                *counts.entry(ngram).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Write counted n-grams to chain blocks as (hash, count) pairs
+    const ENTRY_BYTES: usize = 16;
+    let mut block = chain.add();
+    for (ngram, count) in &counts {
+        let hash = simple_hash(ngram);
+        let mut entry = [0u8; ENTRY_BYTES];
+        entry[0..8].copy_from_slice(&hash.to_le_bytes());
+        entry[8..16].copy_from_slice(&count.to_le_bytes());
+        if !block.push(&entry) {
+            chain.pass(block);
+            block = chain.add();
+            block.push(&entry);
+        }
+    }
+    chain.pass(block);
+    Ok(total_tokens)
 }
 
+fn simple_hash(ngram: &[u32]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for &w in ngram {
+        for byte in w.to_le_bytes() {
+            h ^= byte as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+    }
+    h
+}

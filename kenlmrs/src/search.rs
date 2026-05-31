@@ -508,98 +508,201 @@ impl<V: Value> Search for HashedSearch<V> {
     }
 }
 
-/// Trie-based search (structure exists; ARPA loading not yet implemented).
-#[derive(Debug)]
-pub struct TrieSearch<Q, B> {
-    unknown_weights: ProbBackoff,
-    _phantom: PhantomData<(Q, B)>,
-}
-
-impl<Q: Quantization, B: Bhiksha> Default for TrieSearch<Q, B> {
-    fn default() -> Self {
-        Self {
-            unknown_weights: ProbBackoff::default(),
-            _phantom: PhantomData,
+impl<V: Value> HashedSearch<V> {
+    /// Serialize the search tables to a writer.
+    pub fn write_binary<W: std::io::Write>(&self, w: &mut W) -> Result<(), crate::error::LMError> {
+        use std::io::Write;
+        // Unigrams: [count: u32][prob: f32, backoff: f32 ...]
+        let n = self.unigram.data.len() as u32;
+        w.write_all(&n.to_le_bytes())?;
+        for pb in &self.unigram.data {
+            w.write_all(&pb.prob.to_le_bytes())?;
+            w.write_all(&pb.backoff.to_le_bytes())?;
         }
+        // Middle tables: [n_orders: u8][for each: [n_entries: u32][key: u64, prob: f32, backoff: f32 ...]]
+        w.write_all(&[self.middle.len() as u8])?;
+        for table in &self.middle {
+            let n = table.data.len() as u32;
+            w.write_all(&n.to_le_bytes())?;
+            for (&key, pb) in &table.data {
+                w.write_all(&key.to_le_bytes())?;
+                w.write_all(&pb.prob.to_le_bytes())?;
+                w.write_all(&pb.backoff.to_le_bytes())?;
+            }
+        }
+        // Longest: [n_entries: u32][key: u64, prob: f32 ...]
+        let n = self.longest.data.len() as u32;
+        w.write_all(&n.to_le_bytes())?;
+        for (&key, &prob) in &self.longest.data {
+            w.write_all(&key.to_le_bytes())?;
+            w.write_all(&prob.to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Deserialize search tables from a reader.
+    pub fn read_binary<R: std::io::Read>(r: &mut R) -> Result<Self, crate::error::LMError> {
+        use std::io::Read;
+        let mut buf4 = [0u8; 4];
+        let mut buf8 = [0u8; 8];
+
+        // Unigrams
+        r.read_exact(&mut buf4)?;
+        let n_uni = u32::from_le_bytes(buf4) as usize;
+        let mut uni_data = Vec::with_capacity(n_uni);
+        for _ in 0..n_uni {
+            r.read_exact(&mut buf4)?;
+            let prob = f32::from_le_bytes(buf4);
+            r.read_exact(&mut buf4)?;
+            let backoff = f32::from_le_bytes(buf4);
+            uni_data.push(ProbBackoff { prob, backoff });
+        }
+
+        // Middle
+        let mut buf1 = [0u8; 1];
+        r.read_exact(&mut buf1)?;
+        let n_orders = buf1[0] as usize;
+        let mut middle = Vec::with_capacity(n_orders);
+        for _ in 0..n_orders {
+            r.read_exact(&mut buf4)?;
+            let n = u32::from_le_bytes(buf4) as usize;
+            let mut table = MiddleTable::with_capacity(n);
+            for _ in 0..n {
+                r.read_exact(&mut buf8)?;
+                let key = u64::from_le_bytes(buf8);
+                r.read_exact(&mut buf4)?;
+                let prob = f32::from_le_bytes(buf4);
+                r.read_exact(&mut buf4)?;
+                let backoff = f32::from_le_bytes(buf4);
+                table.insert(key, ProbBackoff { prob, backoff });
+            }
+            middle.push(table);
+        }
+
+        // Longest
+        r.read_exact(&mut buf4)?;
+        let n = u32::from_le_bytes(buf4) as usize;
+        let mut longest = LongestTable::with_capacity(n);
+        for _ in 0..n {
+            r.read_exact(&mut buf8)?;
+            let key = u64::from_le_bytes(buf8);
+            r.read_exact(&mut buf4)?;
+            let prob = f32::from_le_bytes(buf4);
+            longest.insert(key, prob);
+        }
+
+        Ok(Self {
+            unigram: UnigramTable { data: uni_data, unknown: ProbBackoff::default() },
+            middle,
+            longest,
+            _phantom: PhantomData,
+        })
     }
 }
 
-impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B> {
-    type Node = TrieNode;
-    type UnigramPointer = TrieUnigramPointer<Q>;
-    type MiddlePointer = TrieMiddlePointer<Q>;
-    type LongestPointer = TrieLongestPointer<Q>;
+/// Re-export the real TrieSearch from trie module.
+pub use crate::trie::TrieSearch;
+
+// Implement Pointer for trie pointer types (bridge between trie module and Search trait).
+impl Pointer for crate::trie::UnigramPointer {
+    fn found(&self) -> bool { self.found }
+    fn prob(&self) -> f32 { self.prob }
+    fn backoff(&self) -> f32 { self.backoff }
+    fn rest(&self) -> f32 { self.prob }
+    fn independent_left(&self) -> bool { crate::model::is_independent_left(self.prob) }
+}
+
+impl Pointer for crate::trie::MiddlePointer {
+    fn found(&self) -> bool { self.found }
+    fn prob(&self) -> f32 { self.prob }
+    fn backoff(&self) -> f32 { self.backoff }
+    fn rest(&self) -> f32 { self.prob }
+    fn independent_left(&self) -> bool { crate::model::is_independent_left(self.prob) }
+}
+
+impl Pointer for crate::trie::LongestPointer {
+    fn found(&self) -> bool { self.found }
+    fn prob(&self) -> f32 { self.prob }
+    fn rest(&self) -> f32 { self.prob }
+}
+
+impl<Q: Quantization, B: Bhiksha> Search for TrieSearch<Q, B>
+where
+    Q: crate::trie::Quantization,
+    B: crate::trie::BhikshaImpl,
+{
+    type Node = crate::trie::NodeRange;
+    type UnigramPointer = crate::trie::UnigramPointer;
+    type MiddlePointer = crate::trie::MiddlePointer;
+    type LongestPointer = crate::trie::LongestPointer;
 
     const K_MODEL_TYPE: u8 = 2;
     const K_DIFFERENT_REST: bool = false;
     const K_VERSION: u32 = 1;
 
-    fn size(_counts: &[u64], _config: &Config) -> u64 {
-        0 // Not yet implemented
+    fn size(counts: &[u64], _config: &Config) -> u64 {
+        let qc = crate::quantize::QuantConfig::default();
+        TrieSearch::<Q, B>::size(counts, &qc)
     }
 
     fn setup_memory(&mut self, _start: &mut [u8], _counts: &[u64], _config: &Config) -> &mut [u8] {
-        &mut [] // Not yet implemented
+        &mut []
     }
 
     fn initialize_from_arpa(
         &mut self,
-        _file: &str,
-        _counts: &[u64],
-        _config: &Config,
-        _vocab: &mut dyn crate::vocabulary::Vocabulary,
+        file: &str,
+        counts: &[u64],
+        config: &Config,
+        vocab: &mut dyn crate::vocabulary::Vocabulary,
     ) -> Result<(), crate::error::LMError> {
-        Err(crate::error::LMError::LoadError(
-            "TrieSearch: ARPA loading is not yet implemented".into(),
-        ))
+        self.initialize_from_arpa(file, counts, config, vocab)
     }
 
     fn order(&self) -> u8 {
-        0
+        self.order()
     }
 
     fn lookup_unigram(
         &self,
-        _word: WordIndex,
-        _node: &mut Self::Node,
+        word: WordIndex,
+        node: &mut Self::Node,
         independent_left: &mut bool,
-        _extend_left: &mut u64,
+        extend_left: &mut u64,
     ) -> Self::UnigramPointer {
-        *independent_left = true;
-        TrieUnigramPointer(PhantomData)
+        self.lookup_unigram(word, node, independent_left, extend_left)
     }
 
     fn lookup_middle(
         &self,
-        _order_minus_2: u8,
-        _word: WordIndex,
-        _node: &mut Self::Node,
+        order_minus_2: u8,
+        word: WordIndex,
+        node: &mut Self::Node,
         independent_left: &mut bool,
-        _extend_left: &mut u64,
+        extend_left: &mut u64,
     ) -> Self::MiddlePointer {
-        *independent_left = true;
-        TrieMiddlePointer(PhantomData)
+        self.lookup_middle(order_minus_2, word, node, independent_left, extend_left)
     }
 
-    fn lookup_longest(&self, _word: WordIndex, _node: &Self::Node) -> Self::LongestPointer {
-        TrieLongestPointer(PhantomData)
+    fn lookup_longest(&self, word: WordIndex, node: &Self::Node) -> Self::LongestPointer {
+        self.lookup_longest(word, node)
     }
 
-    fn fast_make_node(&self, _begin: &[WordIndex], _node: &mut Self::Node) -> bool {
-        false
+    fn fast_make_node(&self, begin: &[WordIndex], node: &mut Self::Node) -> bool {
+        self.fast_make_node(begin, begin, node)
     }
 
     fn unpack(
         &self,
-        _extend_pointer: u64,
-        _extend_length: u8,
-        _node: &mut Self::Node,
+        extend_pointer: u64,
+        extend_length: u8,
+        node: &mut Self::Node,
     ) -> Self::MiddlePointer {
-        TrieMiddlePointer(PhantomData)
+        self.unpack(extend_pointer, extend_length, node)
     }
 
     fn unknown_unigram(&mut self) -> &mut ProbBackoff {
-        &mut self.unknown_weights
+        self.unknown_unigram()
     }
 }
 
@@ -880,42 +983,10 @@ impl Pointer for HashedLongestPointer {
     }
 }
 
-// Trie pointer types (placeholders)
-#[derive(Debug)]
-pub struct TrieNode;
-#[derive(Debug)]
-pub struct TrieUnigramPointer<Q>(PhantomData<Q>);
-#[derive(Debug)]
-pub struct TrieMiddlePointer<Q>(PhantomData<Q>);
-#[derive(Debug)]
-pub struct TrieLongestPointer<Q>(PhantomData<Q>);
-
-impl<Q> Pointer for TrieUnigramPointer<Q> {
-    fn found(&self) -> bool { false }
-    fn prob(&self) -> f32 { 0.0 }
-}
-
-impl<Q> Pointer for TrieMiddlePointer<Q> {
-    fn found(&self) -> bool { false }
-    fn prob(&self) -> f32 { 0.0 }
-}
-
-impl<Q> Pointer for TrieLongestPointer<Q> {
-    fn found(&self) -> bool { false }
-    fn prob(&self) -> f32 { 0.0 }
-}
-
 /// Hash function for combining word indices
 fn combine_word_hash(current: u64, next: WordIndex) -> u64 {
     current.wrapping_mul(8978948897894561157) ^
         (1 + (next as u64)).wrapping_mul(17894857484156487943)
-}
-
-// Default implementation for TrieNode
-impl Default for TrieNode {
-    fn default() -> Self {
-        TrieNode
-    }
 }
 
 #[cfg(test)]

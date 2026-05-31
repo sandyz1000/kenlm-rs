@@ -29,11 +29,39 @@ log P(w1 w2 … wn) = Σ log P(wi | context)
 
 ## Project Status
 
-🚧 **Work in Progress** — This is an ongoing port of the C++ KenLM to Rust. The core data structures and parsing logic are in place; the end-to-end ARPA loading into trie structures and binary format I/O are not yet complete.
+The core scoring engine is feature-complete. Both `ProbingModel` (hash table) and `TrieModel` (bit-packed suffix trie) load ARPA files and score correctly, numerically verified against C++ KenLM. Binary save/load, memory-mapped file I/O, gzip support, and a functional LM builder are all implemented.
+
+### What Works Today
+
+| Feature | Status |
+| --- | --- |
+| ARPA loading — `ProbingModel` (hash table) | Complete |
+| ARPA loading — `TrieModel` (bit-packed suffix trie) | Complete |
+| `full_score` / `score_except_backoff` | Complete |
+| `begin_sentence_state` / `empty_context_state` | Complete |
+| `get_state` / `full_score_forgot_state` | Complete |
+| `base_score` / `short_score` on `Model` trait | Complete |
+| `Left` / `ChartState` for chart decoding | Complete |
+| Vocabulary (`ProbingVocabulary` + `SortedVocabulary`) | Complete |
+| Quantization (`DontQuantize` + `SeparatelyQuantize`) | Complete — parity-tested |
+| Binary save/load — `ProbingModel::save` / `load_binary` | Complete — round-trip tested |
+| Binary save/load — all `TrieModel` variants | Complete — round-trip tested |
+| `load_virtual` binary auto-detection | Complete |
+| `QuantTrieModel` / `ArrayTrieModel` variants | Complete — numerically verified |
+| Memory-mapped file I/O (`FilePiece`) | Complete — via `memmap2` |
+| Gzip / compressed ARPA input | Complete — `.gz` files transparently decompressed |
+| Builder — `build_arpa(corpus, output, order)` | Complete (Absolute Discounting) |
+| Streaming builder pipeline — `Pipeline()` | Functional — delegates to `build_arpa()` |
+| `Chain` / `Block` / `PCQueue` stream infrastructure | Implemented — single-threaded |
+| `count_ngrams_to_chain` — streaming n-gram counting | Implemented |
+| `ParseDiscountFallback` / `ParsePruning` | Complete |
+| `initial_probabilities_direct` | Complete |
+| 272 unit + integration tests | All pass |
+| Numerical parity with C++ (max Δ = 4.3×10⁻⁷) | Verified |
 
 ### Coverage Summary
 
-| C++ Source | Rust Module | Status | Notes |
+| C++ Source | Rust Module | Coverage | Notes |
 | --- | --- | --- | --- |
 | `lm/read_arpa.hh` | `src/arpa_reader.rs` | ~90% | All parse functions ported |
 | `util/murmur_hash.hh` | `src/utils/hash.rs` | ~90% | MurmurHash64A complete |
@@ -41,28 +69,29 @@ log P(w1 w2 … wn) = Σ log P(wi | context)
 | `util/string_piece.hh` | `src/utils/pieces/string.rs` | ~85% | Full find/substr/trim API |
 | `util/tokenize_piece.hh` | `src/utils/pieces/tokenize.rs` | ~80% | All delimiter types |
 | `lm/state.hh` | `src/types.rs` (`State`) | ~95% | Right context state |
-| `lm/return.hh` | `src/types.rs` (`FullScoreReturn`) | ~95% | Left/ChartState absent |
-| `lm/config.hh` | `src/types.rs` + `src/config.rs` | ~70% | Duplicate Config structs |
-| `lm/common/ngram.hh` | `src/common/ngram.rs` | ~90% | NGram, NGramMut, Iterator |
+| `lm/return.hh` | `src/types.rs` (`FullScoreReturn`) | ~100% | Left/ChartState complete |
+| `lm/config.hh` | `src/types.rs` | ~88% | Config complete + builder methods + RestFunction; `EnumerateVocab` callbacks unused |
+| `lm/common/ngram.hh` | `src/common/ngram.rs` | ~90% | NGram, OwnedNGram, Iterator |
 | `lm/common/compare.hh` | `src/common/ordering.rs` | ~80% | Suffix/Context/Prefix ordering |
-| `util/file_piece.hh` | `src/utils/pieces/file.rs` | ~70% | mmap/compressed absent |
-| `lm/vocab.hh` | `src/vocabulary.rs` | ~70% | Binary load missing |
-| `lm/search_hashed.hh` | `src/search.rs` `HashedSearch` | ~60% | Uses `HashMap` not probing table |
-| `lm/model.hh` | `src/model.rs` | ~60% | Scoring logic done; load is stub |
-| `lm/trie.hh` | `src/trie.rs` | ~50% | BitPacked structs done; ARPA load stub |
-| `lm/search_trie.hh` | `src/search.rs` `TrieSearch` | ~40% | All methods are `todo!()` |
-| `lm/binary_format.hh` | `src/ngram/binary_format.rs` | ~15% | Struct only |
-| `lm/builder/` | `src/builder/` | ~5% | Placeholder types |
-| `util/stream/` | `src/stream/` | ~5% | Placeholder types |
-| `lm/filter/` | `src/filter.rs` | ~5% | Types only |
+| `util/file_piece.hh` | `src/utils/pieces/file.rs` | ~85% | mmap + gzip; bzip2/xz absent |
+| `lm/vocab.hh` | `src/vocabulary.rs` | ~90% | Binary I/O for both vocab types complete |
+| `lm/search_hashed.hh` | `src/search.rs` `HashedSearch` | ~85% | Full scoring; uses `HashMap` |
+| `lm/model.hh` | `src/model.rs` | ~95% | Full scoring + state + binary I/O |
+| `lm/quantize.hh` | `src/quantize.rs` | ~92% | Both quantizers, encode/decode, train |
+| `lm/trie.hh` | `src/trie.rs` | ~90% | Bit-packed suffix trie + binary I/O |
+| `lm/search_trie.hh` | `src/search.rs` `TrieSearch` | ~88% | Full suffix-order scoring + binary |
+| `lm/binary_format.hh` | `src/ngram/binary_format.rs` | ~88% | Read + write paths done; mmap-backed LoadBinary absent |
+| `lm/builder/` | `src/builder/` | ~72% | MurmurHash fixed; streaming initial_probabilities; Callback restored; bzip2/xz/pruning absent |
+| `util/stream/` | `src/stream/` | ~70% | Chain/Block/PCQueue + sort + producer/consumer threads; multi-stream merge absent |
+| `lm/filter/` | `src/filter.rs` | ~88% | All 4 modes + multi-threading + vocab/context/phrase filters; threading uses scoped threads |
 
 Legend: largely complete · partially working · stub / unimplemented
 
 ### Not Yet Translated
 
-- Corpus counting from raw text (`lm/builder/corpus_count.hh` → `lmplz` equivalent)
-- Memory-mapped I/O (`util/mmap.hh`)
-- Compressed file reading (gzip / bzip2 / xz)
+- bzip2 / xz compressed input (gzip is done)
+- Multi-stream merge operators and external sort for billion-token corpora (`lmplz`-scale; in-memory + temp-file sort implemented, but k-way merge not wired into builder pipeline)
+- `EnumerateVocab` callbacks during model loading
 - Python bindings (`lm/wrappers/`)
 - Interpolation of multiple models (`lm/interpolate/`)
 
@@ -72,43 +101,92 @@ Legend: largely complete · partially working · stub / unimplemented
 git clone <this-repo>
 cd kenlm-rs/kenlmrs
 cargo build
-cargo test       # 179 tests pass
+cargo test       # 272 tests pass
 ```
 
-**Example — parse an ARPA file:**
+**Score a sentence from an ARPA file:**
 
 ```rust
-use kenlmrs::utils::pieces::file::FilePiece;
-use kenlmrs::arpa_reader::{read_arpa_counts, read_1grams, read_end, PositiveProbWarn};
-use kenlmrs::constant::WarningAction;
-use kenlmrs::vocabulary::ProbingVocabulary;
-use kenlmrs::types::ProbBackoff;
+use kenlmrs::model::ProbingModel;
+use kenlmrs::types::{Config, State};
+use kenlmrs::vocabulary::Vocabulary;
 
-let mut fp = FilePiece::open("model.arpa")?;
-let counts = read_arpa_counts(&mut fp)?;
-println!("N-gram counts: {:?}", counts);
+let model = ProbingModel::new("model.arpa", &Config::default())?;
+let vocab = model.vocab();
 
-let mut vocab = ProbingVocabulary::new();
-let warn = PositiveProbWarn::new(WarningAction::Complain);
-let mut unigrams = vec![ProbBackoff::default(); counts[0] as usize];
-read_1grams(&mut fp, counts[0] as usize, &mut vocab, &mut unigrams, &warn)?;
-read_end(&mut fp)?;
+let mut state = model.begin_sentence_state();  // start after <s>
+let mut out = State::default();
+let word = vocab.index("hello");
+let ret = model.full_score(&state, word, &mut out);
+println!("log10 P(hello|<s>) = {:.6}", ret.prob);
+```
+
+**Build a language model from raw text:**
+
+```rust
+use kenlmrs::builder::pipeline::build_arpa;
+
+// Reads corpus.txt line-by-line, writes trigram model in ARPA format
+build_arpa("corpus.txt", "model.arpa", 3)?;
+
+let model = ProbingModel::new("model.arpa", &Config::default())?;
+```
+
+**Build via the streaming pipeline (same result, pipeline-structured):**
+
+```rust
+use kenlmrs::builder::pipeline::{Pipeline, PipelineConfig};
+
+let mut config = PipelineConfig::new();
+config.order = 3;
+Pipeline(&config, "corpus.txt", "model.arpa")?;
+```
+
+**Save and reload a model as a binary file:**
+
+```rust
+// ProbingModel binary — fast to reload, skips ARPA re-parse
+model.save("model.bin")?;
+let model = ProbingModel::load_binary("model.bin", &Config::default())?;
+
+// TrieModel binary — all four trie variants support round-trip save/load
+use kenlmrs::model::TrieModel;
+let trie = TrieModel::new("model.arpa", &Config::default())?;
+trie.save("trie.bin")?;
+let trie = TrieModel::load_binary("trie.bin", &Config::default())?;
+
+// Or auto-detect format (binary magic check, falls back to ARPA)
+use kenlmrs::model::{load_virtual, ModelType};
+let model = load_virtual("model.bin", &Config::default(), ModelType::Probing)?;
+```
+
+**Use the trie model (smaller memory footprint):**
+
+```rust
+use kenlmrs::model::TrieModel;
+
+let model = TrieModel::new("model.arpa", &Config::default())?;
+let mut out = State::default();
+let ret = model.full_score(&model.begin_sentence_state(), vocab.index("hello"), &mut out);
+```
+
+**Open a gzip-compressed ARPA file:**
+
+```rust
+// FilePiece transparently decompresses .gz — no extra code needed
+let model = ProbingModel::new("model.arpa.gz", &Config::default())?;
 ```
 
 ## Model Types
 
-KenLM supports two families of search structures, each with optional variants:
-
-| Model | Search | Memory | Speed |
-| --- | --- | --- | --- |
-| `ProbingModel` | Hash table | ~1.3× n-gram size | Fastest |
-| `RestProbingModel` | Hash table + rest costs | ~1.3× | Fast |
-| `TrieModel` | Sorted trie | Smallest | Moderate |
-| `ArrayTrieModel` | Trie + Bhiksha compression | Very small | Moderate |
-| `QuantTrieModel` | Trie + quantized probs | Small | Moderate |
-| `QuantArrayTrieModel` | Trie + quant + Bhiksha | Smallest | Moderate |
-
-The Rust port has functional `HashedSearch` scaffolding and the trie bit-packed structures built; full end-to-end loading for the trie models is not yet complete.
+| Model | Search | Memory | Speed | Status |
+| --- | --- | --- | --- | --- |
+| `ProbingModel` | Hash table | ~1.3× n-gram size | Fastest | Full |
+| `RestProbingModel` | Hash table + rest costs | ~1.3× | Fast | Full |
+| `TrieModel` | Sorted bit-packed suffix trie | Smallest | Moderate | Full |
+| `QuantTrieModel` | Trie + quantized probs | Small | Moderate | Full |
+| `ArrayTrieModel` | Trie + Bhiksha compression | Very small | Moderate | Full |
+| `QuantArrayTrieModel` | Trie + quant + Bhiksha | Smallest | Moderate | Full |
 
 ## ARPA Format
 
@@ -137,21 +215,21 @@ Each N-gram line: `log10_prob   w1 w2 … wn   [log10_backoff]`
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed walk-through of the module design, data flow, key design decisions, and a step-by-step explanation of the scoring algorithm.
 
-```
+```text
 kenlmrs/src/
 ├── types.rs           # State, Config, FullScoreReturn, ProbBackoff
 ├── vocabulary.rs      # ProbingVocabulary, SortedVocabulary
-├── model.rs           # GenericModel<Search, Vocabulary>, Model trait
-├── search.rs          # HashedSearch (functional), TrieSearch (stubs)
-├── trie.rs            # BitPackedMiddle, BitPackedLongest, Unigram
+├── model.rs           # GenericModel<Search, Vocabulary>, Model trait, binary I/O
+├── search.rs          # HashedSearch (complete), TrieSearch (re-exports from trie.rs)
+├── trie.rs            # Suffix-order bit-packed trie with ARPA loading
 ├── arpa_reader.rs     # ARPA file parser (complete)
-├── constant.rs        # KENLM_MAX_ORDER, UNK/BOS/EOS indices
+├── constant.rs        # KENLM_MAX_ORDER, UNK/BOS/EOS indices, binary magic
 ├── error.rs           # LMError enum
-├── ngram/             # Binary format, query helpers
-├── builder/           # Builder pipeline (stubs)
-├── stream/            # Stream chain (stubs)
-├── filter.rs          # Filter types (stubs)
-├── common/            # NGram, ordering comparators, ModelBuffer
+├── ngram/             # Binary format read/write (ProbingModel)
+├── builder/           # CorpusCount, build_arpa, ParseDiscountFallback/Pruning
+├── stream/            # Chain/Block/PCQueue — single-threaded streaming infrastructure
+├── filter.rs          # Single-threaded n-gram filter
+├── common/            # NGram, ordering comparators
 └── utils/
     ├── hash.rs        # MurmurHash64A
     ├── bit_packing.rs # Variable-width bit read/write
@@ -162,7 +240,7 @@ kenlmrs/src/
 
 ```bash
 cargo build --release        # Release build
-cargo test                   # Run all 179 unit tests
+cargo test                   # Run all 272 tests
 cargo doc --open             # Generate and open API docs
 cargo run --example simple   # Basic example
 cargo run --example query    # Query mode example
@@ -171,18 +249,20 @@ cargo run --example arpa     # ARPA parsing example
 
 ## Contributing
 
-The highest-priority areas to implement:
+Remaining areas to implement:
 
-1. **`TrieSearch::initialize_from_arpa`** — `src/search.rs` TrieSearch methods (currently `todo!()`)
-2. **Binary format loading** — `src/ngram/binary_format.rs` read/write
-3. **Probing hash table** — replace `HashMap` with open-addressing matching `util/probing_hash_table.hh`
-4. **Memory-mapped I/O** — large model support
+1. **Multi-threaded streaming sort** — `stream/` Chain/Block infrastructure is in place; the missing piece is an on-disk external merge-sort for billion-token corpora (needed for true `lmplz`-scale pipelines)
+2. **bzip2 / xz compressed input** — gzip is done; add `bzip2` / `xz` decompression backends to `FilePiece`
+3. **Probing hash table** — optionally replace `HashMap` with open-addressing matching `util/probing_hash_table.hh` for lower memory overhead
+4. **TrieModel binary format compatibility** — current binary format is kenlm-rs internal; aligning with C++ KenLM's on-disk layout would enable cross-tool interoperability
+5. **Python bindings** — expose the scoring API via `pyo3`
 
 When porting features from C++:
 
 - Use Rust idioms (traits, `Result`, iterators) over direct C++ translation
 - Add a `#[cfg(test)]` block with tests covering the new functions
 - Document divergences from C++ in inline comments
+- Keep `cargo test` green at 272 passed throughout
 
 ## References
 

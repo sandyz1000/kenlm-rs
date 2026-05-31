@@ -282,6 +282,16 @@ impl Default for ProbBackoff {
     }
 }
 
+/// Rest-cost function for left-context scoring (RestProbingModel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RestFunction {
+    /// Use the maximum probability of any right-context extension (conservative).
+    #[default]
+    RestMax,
+    /// Use a lower-order model to bound rest costs.
+    RestLower,
+}
+
 /// Configuration for language model loading and operation
 pub struct Config {
     /// How to handle unknown words
@@ -308,6 +318,20 @@ pub struct Config {
     pub enumerate_vocab: Option<Box<dyn EnumerateVocab>>,
     /// Warn about positive log probabilities
     pub positive_log_probability: PositiveLogProbability,
+    /// Action when sentence markers (<s>, </s>) are missing from the vocabulary
+    pub sentence_marker_missing: crate::constant::WarningAction,
+    /// Whether to embed the vocabulary in the binary file
+    pub include_vocab: bool,
+    /// Bits used for Bhiksha pointer compression (0 = DontBhiksha)
+    pub pointer_bhiksha_bits: u8,
+    /// Bits per quantized probability value (SeparatelyQuantize only)
+    pub prob_bits: u8,
+    /// Bits per quantized backoff value (SeparatelyQuantize only)
+    pub backoff_bits: u8,
+    /// Rest-cost function for RestProbingModel
+    pub rest_function: RestFunction,
+    /// Lower-order model files used when rest_function = RestLower
+    pub rest_lower_files: Vec<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -317,10 +341,7 @@ impl std::fmt::Debug for Config {
             .field("unknown_missing_logprob", &self.unknown_missing_logprob)
             .field("probing_multiplier", &self.probing_multiplier)
             .field("building_memory", &self.building_memory)
-            .field(
-                "temporary_directory_prefix",
-                &self.temporary_directory_prefix,
-            )
+            .field("temporary_directory_prefix", &self.temporary_directory_prefix)
             .field("arpa_complain", &self.arpa_complain)
             .field("write_method", &self.write_method)
             .field("write_mmap", &self.write_mmap)
@@ -328,6 +349,13 @@ impl std::fmt::Debug for Config {
             .field("messages", &self.messages.is_some())
             .field("enumerate_vocab", &self.enumerate_vocab.is_some())
             .field("positive_log_probability", &self.positive_log_probability)
+            .field("sentence_marker_missing", &self.sentence_marker_missing)
+            .field("include_vocab", &self.include_vocab)
+            .field("pointer_bhiksha_bits", &self.pointer_bhiksha_bits)
+            .field("prob_bits", &self.prob_bits)
+            .field("backoff_bits", &self.backoff_bits)
+            .field("rest_function", &self.rest_function)
+            .field("rest_lower_files", &self.rest_lower_files)
             .finish()
     }
 }
@@ -379,7 +407,7 @@ impl Default for Config {
             unknown_missing: UnknownMissing::ThrowUp,
             unknown_missing_logprob: -100.0,
             probing_multiplier: 1.5,
-            building_memory: 1 << 30, // 1GB
+            building_memory: 1 << 30,
             temporary_directory_prefix: None,
             arpa_complain: ARPAComplain::All,
             write_method: WriteMethod::WriteMethod,
@@ -388,6 +416,13 @@ impl Default for Config {
             messages: None,
             enumerate_vocab: None,
             positive_log_probability: PositiveLogProbability::Throw,
+            sentence_marker_missing: crate::constant::WarningAction::Complain,
+            include_vocab: true,
+            pointer_bhiksha_bits: 8,
+            prob_bits: 8,
+            backoff_bits: 8,
+            rest_function: RestFunction::RestMax,
+            rest_lower_files: Vec::new(),
         }
     }
 }
@@ -397,7 +432,67 @@ impl Config {
         Self::default()
     }
 
-    /// Check if progress messages should be shown
+    pub fn with_probing_multiplier(mut self, v: f32) -> Self {
+        self.probing_multiplier = v;
+        self
+    }
+
+    pub fn with_building_memory(mut self, v: usize) -> Self {
+        self.building_memory = v;
+        self
+    }
+
+    pub fn with_load_method(mut self, v: LoadMethod) -> Self {
+        self.load_method = v;
+        self
+    }
+
+    pub fn with_arpa_complain(mut self, v: ARPAComplain) -> Self {
+        self.arpa_complain = v;
+        self
+    }
+
+    pub fn with_unknown_missing(mut self, v: UnknownMissing) -> Self {
+        self.unknown_missing = v;
+        self
+    }
+
+    pub fn with_unknown_missing_logprob(mut self, v: f32) -> Self {
+        self.unknown_missing_logprob = v;
+        self
+    }
+
+    pub fn with_include_vocab(mut self, v: bool) -> Self {
+        self.include_vocab = v;
+        self
+    }
+
+    pub fn with_prob_bits(mut self, v: u8) -> Self {
+        self.prob_bits = v;
+        self
+    }
+
+    pub fn with_backoff_bits(mut self, v: u8) -> Self {
+        self.backoff_bits = v;
+        self
+    }
+
+    pub fn with_rest_function(mut self, v: RestFunction) -> Self {
+        self.rest_function = v;
+        self
+    }
+
+    pub fn with_rest_lower_files(mut self, files: Vec<String>) -> Self {
+        self.rest_lower_files = files;
+        self.rest_function = RestFunction::RestLower;
+        self
+    }
+
+    pub fn with_temporary_directory_prefix(mut self, prefix: String) -> Self {
+        self.temporary_directory_prefix = Some(prefix);
+        self
+    }
+
     pub fn progress_messages(&self) -> bool {
         self.messages.is_some()
     }
@@ -530,6 +625,41 @@ mod tests {
         assert!(!c.progress_messages());
         assert!(c.write_mmap.is_none());
         assert!(c.enumerate_vocab.is_none());
+        assert_eq!(c.prob_bits, 8);
+        assert_eq!(c.backoff_bits, 8);
+        assert!(c.include_vocab);
+        assert_eq!(c.rest_function, RestFunction::RestMax);
+        assert!(c.rest_lower_files.is_empty());
+    }
+
+    #[test]
+    fn test_config_builder_pattern() {
+        let c = Config::new()
+            .with_probing_multiplier(2.0)
+            .with_building_memory(512 * 1024 * 1024)
+            .with_prob_bits(4)
+            .with_backoff_bits(4)
+            .with_include_vocab(false)
+            .with_unknown_missing(UnknownMissing::Silent);
+        assert_eq!(c.probing_multiplier, 2.0);
+        assert_eq!(c.building_memory, 512 * 1024 * 1024);
+        assert_eq!(c.prob_bits, 4);
+        assert_eq!(c.backoff_bits, 4);
+        assert!(!c.include_vocab);
+        assert_eq!(c.unknown_missing, UnknownMissing::Silent);
+    }
+
+    #[test]
+    fn test_config_rest_lower_sets_function() {
+        let c = Config::new()
+            .with_rest_lower_files(vec!["lower.arpa".to_string()]);
+        assert_eq!(c.rest_function, RestFunction::RestLower);
+        assert_eq!(c.rest_lower_files, vec!["lower.arpa"]);
+    }
+
+    #[test]
+    fn test_rest_function_default() {
+        assert_eq!(RestFunction::default(), RestFunction::RestMax);
     }
 
     // ── ModelType ─────────────────────────────────────────────────────────────

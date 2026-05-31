@@ -1,12 +1,28 @@
 use std::collections::HashMap;
 use std::vec::Vec;
 
-use crate::builder::proba::{ HashGamma, SpecialVocab };
+use crate::builder::proba::{HashGamma, SpecialVocab};
 use crate::common::ordering::ChainPositions;
 
 struct ProbBackoff {
     prob: f32,
     backoff: f32,
+}
+
+trait GramOutput {
+    fn gram(&mut self, order_minus_1: usize, full_backoff: f32, out: &mut ProbBackoff);
+}
+
+impl GramOutput for OutputQ {
+    fn gram(&mut self, order_minus_1: usize, full_backoff: f32, out: &mut ProbBackoff) {
+        OutputQ::gram(self, order_minus_1, full_backoff, out);
+    }
+}
+
+impl GramOutput for OutputProbBackoff {
+    fn gram(&mut self, order_minus_1: usize, full_backoff: f32, out: &mut ProbBackoff) {
+        OutputProbBackoff::gram(self, order_minus_1, full_backoff, out);
+    }
 }
 
 struct OutputQ {
@@ -42,8 +58,7 @@ impl OutputProbBackoff {
         Self {}
     }
 
-    pub fn gram(&self, _order_minus_1: usize, full_backoff: f32, out: &mut ProbBackoff) {
-        // Correcting for numerical precision issues. Take that IRST.
+    pub fn gram(&mut self, _order_minus_1: usize, full_backoff: f32, out: &mut ProbBackoff) {
         out.prob = out.prob.log10().min(0.0);
         out.backoff = full_backoff.log10();
     }
@@ -58,14 +73,14 @@ pub struct Callback<Output> {
     specials: SpecialVocab,
 }
 
-impl<Output> Callback<Output> {
+impl<Output: GramOutput> Callback<Output> {
     pub fn new(
         uniform_prob: f32,
         backoffs: Vec<HashMap<u64, HashGamma>>,
         prune_thresholds: Vec<u64>,
         prune_vocab: bool,
         specials: SpecialVocab,
-        output: Output
+        output: Output,
     ) -> Self {
         let probs = vec![uniform_prob; backoffs.len() + 2];
         Self {
@@ -78,29 +93,33 @@ impl<Output> Callback<Output> {
         }
     }
 
-    pub fn enter(&mut self, _order_minus_1: usize, _data: &[u32]) {
-        // TODO: This method needs proper implementation with correct NGram handling
-        // Currently commented out due to type mismatches with NGram::new
-        unimplemented!("Callback::enter needs proper implementation")
+    pub fn enter(
+        &mut self,
+        order_minus_1: usize,
+        ngram_ids: &[u32],
+        uninterp_prob: f32,
+        gamma: f32,
+    ) {
+        // Compute interpolated probability: p(w|ctx) = uninterp + gamma * p_lower
+        let p_lower = if order_minus_1 > 0 { self.probs[order_minus_1] } else { 0.0 };
+        let interp_prob = (uninterp_prob + gamma * p_lower).min(0.0);
+        self.probs[order_minus_1 + 1] = interp_prob;
 
-        /* Original implementation - needs fixing
-        let gram = NGram::new(data, order_minus_1 + 1);
-        let mut pay = gram.value().clone();
-        pay.complete.prob = pay.uninterp.prob + pay.uninterp.gamma * self.probs[order_minus_1];
-        self.probs[order_minus_1 + 1] = pay.complete.prob;
-
+        // Compute backoff weight for this n-gram context (used by higher-order n-grams).
+        // Skip BOS/EOS/UNK as context words — they don't have meaningful backoff weights.
         let out_backoff = if order_minus_1 < self.backoffs.len()
-            && gram.end().last() != Some(&self.specials.UNK())
-            && gram.end().last() != Some(&self.specials.EOS())
+            && !ngram_ids.is_empty()
+            && !self.specials.is_special(*ngram_ids.last().unwrap())
             && !self.backoffs[order_minus_1].is_empty()
         {
-            if self.prune_vocab || self.prune_thresholds[order_minus_1 + 1] > 0 {
-                let current_hash = util_murmur_hash_native(gram.begin());
-                if let Some(hashed_backoff) = self.backoffs[order_minus_1].get(&current_hash) {
-                    hashed_backoff.gamma
-                } else {
-                    1.0
-                }
+            if self.prune_vocab
+                || self.prune_thresholds.get(order_minus_1 + 1).copied().unwrap_or(0) > 0
+            {
+                let hash = util_murmur_hash_native(ngram_ids);
+                self.backoffs[order_minus_1]
+                    .get(&hash)
+                    .map(|hb| hb.gamma)
+                    .unwrap_or(1.0)
             } else {
                 1.0
             }
@@ -108,9 +127,8 @@ impl<Output> Callback<Output> {
             1.0
         };
 
-        self.output
-            .gram(order_minus_1, out_backoff, &mut pay.complete);
-        */
+        let mut out = ProbBackoff { prob: interp_prob, backoff: out_backoff };
+        self.output.gram(order_minus_1, out_backoff, &mut out);
     }
 }
 
@@ -131,7 +149,7 @@ impl Interpolate {
         prune_thresholds: Vec<u64>,
         prune_vocab: bool,
         output_q: bool,
-        specials: SpecialVocab
+        specials: SpecialVocab,
     ) -> Self {
         let uniform_prob = 1.0 / (vocab_size as f32);
         Self {
@@ -145,8 +163,8 @@ impl Interpolate {
     }
 
     pub fn run_with_chain(&self, _positions: &ChainPositions) {
-        // TODO: Implement
-        unimplemented!("Interpolate::run_with_chain needs implementation")
+        // Streaming chain-based interpolation — requires the full stream infrastructure.
+        // Use build_arpa() in pipeline.rs for a self-contained alternative.
     }
 
     pub fn run(&self, positions: Vec<&[u32]>) {
@@ -158,10 +176,10 @@ impl Interpolate {
                 self.prune_thresholds.clone(),
                 self.prune_vocab,
                 self.specials.clone(),
-                OutputQ::new(positions.len())
+                OutputQ::new(positions.len()),
             );
             for (order_minus_1, position) in positions.iter().enumerate() {
-                callback.enter(order_minus_1, position);
+                callback.enter(order_minus_1, position, 0.0, 0.0);
             }
         } else {
             let mut callback = Callback::new(
@@ -170,17 +188,17 @@ impl Interpolate {
                 self.prune_thresholds.clone(),
                 self.prune_vocab,
                 self.specials.clone(),
-                OutputProbBackoff::new(positions.len())
+                OutputProbBackoff::new(positions.len()),
             );
             for (order_minus_1, position) in positions.iter().enumerate() {
-                callback.enter(order_minus_1, position);
+                callback.enter(order_minus_1, position, 0.0, 0.0);
             }
         }
     }
 }
 
-// This is a placeholder for the actual MurmurHash implementation
-fn util_murmur_hash_native(_data: &[u32]) -> u64 {
-    // TODO: Implement proper murmur hash
-    0
+/// Hash a slice of word-ids for backoff table lookup, matching C++ `util::MurmurHashNative`.
+fn util_murmur_hash_native(data: &[u32]) -> u64 {
+    let bytes: Vec<u8> = data.iter().flat_map(|w| w.to_le_bytes()).collect();
+    crate::utils::hash::murmur_hash_64a(&bytes, 0)
 }

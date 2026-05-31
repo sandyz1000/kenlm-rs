@@ -286,7 +286,9 @@ where
         let mut node = S::Node::default();
         let mut independent_left = false;
         let mut extend_left = 0u64;
-        let uni = self.search.lookup_unigram(bos, &mut node, &mut independent_left, &mut extend_left);
+        let uni =
+            self.search
+                .lookup_unigram(bos, &mut node, &mut independent_left, &mut extend_left);
         state.backoff[0] = uni.backoff();
         state
     }
@@ -307,7 +309,9 @@ where
         let mut node = S::Node::default();
         let mut independent_left = false;
         let mut extend_left = 0u64;
-        let uni = self.search.lookup_unigram(first, &mut node, &mut independent_left, &mut extend_left);
+        let uni =
+            self.search
+                .lookup_unigram(first, &mut node, &mut independent_left, &mut extend_left);
         state.backoff[0] = uni.backoff();
         if has_extension(state.backoff[0]) {
             state.length = 1;
@@ -315,7 +319,11 @@ where
 
         for (i, &word) in context[1..].iter().enumerate() {
             let ptr = self.search.lookup_middle(
-                i as u8, word, &mut node, &mut independent_left, &mut extend_left,
+                i as u8,
+                word,
+                &mut node,
+                &mut independent_left,
+                &mut extend_left,
             );
             if !ptr.found() {
                 break;
@@ -326,8 +334,7 @@ where
             }
         }
 
-        state.words[..state.length as usize]
-            .copy_from_slice(&context[..state.length as usize]);
+        state.words[..state.length as usize].copy_from_slice(&context[..state.length as usize]);
         state
     }
 
@@ -359,7 +366,10 @@ where
 
         if start <= 1 {
             let uni = self.search.lookup_unigram(
-                context[0], &mut node, &mut independent_left, &mut extend_left,
+                context[0],
+                &mut node,
+                &mut independent_left,
+                &mut extend_left,
             );
             ret.prob += uni.backoff();
         } else if !self.search.fast_make_node(&context[..start - 1], &mut node) {
@@ -372,7 +382,11 @@ where
                 break;
             }
             let ptr = self.search.lookup_middle(
-                order, word, &mut node, &mut independent_left, &mut extend_left,
+                order,
+                word,
+                &mut node,
+                &mut independent_left,
+                &mut extend_left,
             );
             if !ptr.found() {
                 break;
@@ -380,6 +394,117 @@ where
             ret.prob += ptr.backoff();
         }
         ret
+    }
+}
+
+impl<
+        V: crate::vocabulary::Vocabulary + VocabularyNew + VocabularySize + BinarySerializableVocab,
+    > GenericModel<HashedSearch<BackoffValue>, V>
+{
+    /// Save model to a binary file (ProbingModel only).
+    pub fn save_probing(&self, path: &str) -> Result<(), LMError> {
+        use crate::constant::BINARY_MAGIC;
+        use std::io::{BufWriter, Write};
+        let file = std::fs::File::create(path)?;
+        let mut w = BufWriter::new(file);
+        // Magic
+        w.write_all(BINARY_MAGIC.as_bytes())?;
+        // FixedWidthParameters
+        let order = self.order();
+        w.write_all(&[order])?;
+        w.write_all(&(1.5f32).to_le_bytes())?; // probing_multiplier
+        w.write_all(&[0u8])?; // model_type: Probing = 0
+        w.write_all(&[1u8])?; // has_vocabulary
+        w.write_all(&(1u32).to_le_bytes())?; // search_version
+                                             // Counts — rebuild from unigram table size (approximate)
+                                             // For a round-trip, we record the actual order; counts are re-read from the ARPA.
+                                             // We store a placeholder count of 0 per order since the binary loads from serialized tables.
+        for _ in 0..order {
+            w.write_all(&(0u64).to_le_bytes())?;
+        }
+        // Vocabulary
+        self.vocab.write_binary_probing(&mut w)?;
+        // Search tables
+        self.search.write_binary(&mut w)?;
+        w.flush()?;
+        Ok(())
+    }
+}
+
+impl<Quant, Bhiksha>
+    GenericModel<crate::trie::TrieSearch<Quant, Bhiksha>, crate::vocabulary::SortedVocabulary>
+where
+    Quant: crate::trie::Quantization,
+    Bhiksha: crate::trie::BhikshaImpl,
+    crate::trie::TrieSearch<Quant, Bhiksha>: Search,
+    <crate::trie::TrieSearch<Quant, Bhiksha> as Search>::Node: Default,
+    <crate::trie::TrieSearch<Quant, Bhiksha> as Search>::UnigramPointer: Pointer,
+    <crate::trie::TrieSearch<Quant, Bhiksha> as Search>::MiddlePointer: Pointer,
+    <crate::trie::TrieSearch<Quant, Bhiksha> as Search>::LongestPointer: Pointer,
+{
+    pub fn save_trie(&self, path: &str) -> Result<(), LMError> {
+        use crate::constant::BINARY_MAGIC;
+        use std::io::{BufWriter, Write};
+        let file = std::fs::File::create(path)?;
+        let mut w = BufWriter::new(file);
+        w.write_all(BINARY_MAGIC.as_bytes())?;
+        let order = self.order();
+        w.write_all(&[order])?;
+        w.write_all(&[2u8])?; // model_type: Trie = 2
+        for _ in 0..order {
+            w.write_all(&(0u64).to_le_bytes())?;
+        }
+        self.vocab.write_binary(&mut w)?;
+        self.search.write_binary(&mut w)?;
+        w.flush()?;
+        Ok(())
+    }
+
+    pub fn load_trie_binary(path: &str, _config: &Config) -> Result<Self, LMError> {
+        use crate::constant::BINARY_MAGIC;
+        use std::io::{BufReader, Read};
+        let file = std::fs::File::open(path)?;
+        let mut r = BufReader::new(file);
+        let mut magic = vec![0u8; BINARY_MAGIC.len()];
+        r.read_exact(&mut magic)?;
+        if magic != BINARY_MAGIC.as_bytes() {
+            return Err(LMError::FormatError("Not a KenLM binary file".into()));
+        }
+        let mut buf1 = [0u8; 1];
+        let mut buf8 = [0u8; 8];
+        r.read_exact(&mut buf1)?;
+        let order = buf1[0];
+        r.read_exact(&mut buf1)?; // model_type (skip)
+        for _ in 0..order {
+            r.read_exact(&mut buf8)?; // counts (skip)
+        }
+        let vocab = crate::vocabulary::SortedVocabulary::read_binary(&mut r)?;
+        let search = crate::trie::TrieSearch::<Quant, Bhiksha>::read_binary(&mut r)?;
+        Ok(Self {
+            backing: BinaryFormat::new(),
+            vocab,
+            search,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+/// Trait for vocabularies that can be binary-serialized (probing variant).
+pub trait BinarySerializableVocab {
+    fn write_binary_probing<W: std::io::Write>(&self, w: &mut W) -> Result<(), LMError>;
+}
+
+impl BinarySerializableVocab for ProbingVocabulary {
+    fn write_binary_probing<W: std::io::Write>(&self, w: &mut W) -> Result<(), LMError> {
+        self.write_binary(w)
+    }
+}
+
+impl BinarySerializableVocab for SortedVocabulary {
+    fn write_binary_probing<W: std::io::Write>(&self, _w: &mut W) -> Result<(), LMError> {
+        Err(LMError::FormatError(
+            "Binary save not supported for SortedVocabulary".into(),
+        ))
     }
 }
 
@@ -458,7 +583,8 @@ macro_rules! define_model {
                 new_word: WordIndex,
                 out_state: &mut State,
             ) -> FullScoreReturn {
-                self.inner.full_score_forgot_state(context, new_word, out_state)
+                self.inner
+                    .full_score_forgot_state(context, new_word, out_state)
             }
 
             /// Score `word` given `in_state` context, writing the new context to `out_state`.
@@ -472,10 +598,14 @@ macro_rules! define_model {
             }
 
             /// N-gram order of this model.
-            pub fn order(&self) -> u8 { self.inner.order() }
+            pub fn order(&self) -> u8 {
+                self.inner.order()
+            }
 
             /// Access the vocabulary.
-            pub fn vocab(&self) -> &$vocab_type { self.inner.vocab() }
+            pub fn vocab(&self) -> &$vocab_type {
+                self.inner.vocab()
+            }
         }
 
         impl Model for $name {
@@ -488,14 +618,12 @@ macro_rules! define_model {
                 self.inner.full_score(context, word, state)
             }
 
-            fn base_score(&self, _context: &State, _word: WordIndex, _state: &mut State) -> f32 {
-                // TODO: Implement base scoring
-                0.0
+            fn base_score(&self, context: &State, word: WordIndex, state: &mut State) -> f32 {
+                self.inner.full_score(context, word, state).prob
             }
 
-            fn short_score(&self, _context: &State, _word: WordIndex, _state: &mut State) -> f32 {
-                // TODO: Implement short scoring
-                0.0
+            fn short_score(&self, context: &State, word: WordIndex, state: &mut State) -> f32 {
+                self.inner.full_score(context, word, state).prob
             }
 
             fn new(file_name: &str, config: &Config) -> Result<Self, LMError> {
@@ -512,6 +640,102 @@ define_model!(TrieModel, TrieSearch<DontQuantize, DontBhiksha>, SortedVocabulary
 define_model!(ArrayTrieModel, TrieSearch<DontQuantize, ArrayBhiksha>, SortedVocabulary);
 define_model!(QuantTrieModel, TrieSearch<SeparatelyQuantize, DontBhiksha>, SortedVocabulary);
 define_model!(QuantArrayTrieModel, TrieSearch<SeparatelyQuantize, ArrayBhiksha>, SortedVocabulary);
+
+impl TrieModel {
+    pub fn save(&self, path: &str) -> Result<(), LMError> {
+        self.inner.save_trie(path)
+    }
+    pub fn load_binary(path: &str, config: &Config) -> Result<Self, LMError> {
+        Ok(Self { inner: GenericModel::<TrieSearch<DontQuantize, DontBhiksha>, SortedVocabulary>::load_trie_binary(path, config)? })
+    }
+}
+
+impl ArrayTrieModel {
+    pub fn save(&self, path: &str) -> Result<(), LMError> {
+        self.inner.save_trie(path)
+    }
+    pub fn load_binary(path: &str, config: &Config) -> Result<Self, LMError> {
+        Ok(Self { inner: GenericModel::<TrieSearch<DontQuantize, ArrayBhiksha>, SortedVocabulary>::load_trie_binary(path, config)? })
+    }
+}
+
+impl QuantTrieModel {
+    pub fn save(&self, path: &str) -> Result<(), LMError> {
+        self.inner.save_trie(path)
+    }
+    pub fn load_binary(path: &str, config: &Config) -> Result<Self, LMError> {
+        Ok(Self { inner: GenericModel::<TrieSearch<SeparatelyQuantize, DontBhiksha>, SortedVocabulary>::load_trie_binary(path, config)? })
+    }
+}
+
+impl QuantArrayTrieModel {
+    pub fn save(&self, path: &str) -> Result<(), LMError> {
+        self.inner.save_trie(path)
+    }
+    pub fn load_binary(path: &str, config: &Config) -> Result<Self, LMError> {
+        Ok(
+            Self {
+                inner: GenericModel::<
+                    TrieSearch<SeparatelyQuantize, ArrayBhiksha>,
+                    SortedVocabulary,
+                >::load_trie_binary(path, config)?,
+            },
+        )
+    }
+}
+
+impl ProbingModel {
+    /// Save model to a binary file for fast subsequent loading.
+    pub fn save(&self, path: &str) -> Result<(), LMError> {
+        self.inner.save_probing(path)
+    }
+
+    /// Load a ProbingModel directly from a binary file.
+    pub fn load_binary(path: &str, _config: &Config) -> Result<Self, LMError> {
+        use crate::constant::BINARY_MAGIC;
+        use std::io::{BufReader, Read};
+
+        let file = std::fs::File::open(path)?;
+        let mut r = BufReader::new(file);
+
+        // Read and verify magic
+        let mut magic = vec![0u8; BINARY_MAGIC.len()];
+        r.read_exact(&mut magic)?;
+        if magic != BINARY_MAGIC.as_bytes() {
+            return Err(LMError::FormatError("Not a KenLM binary file".into()));
+        }
+
+        // Skip FixedWidthParameters (order:1 + multiplier:4 + model_type:1 + has_vocab:1 + version:4 = 11)
+        // plus counts (order * 8) — we re-read these from the serialized tables
+        let mut buf1 = [0u8; 1];
+        r.read_exact(&mut buf1)?;
+        let order = buf1[0];
+        let mut buf4 = [0u8; 4];
+        r.read_exact(&mut buf4)?; // probing_multiplier
+        r.read_exact(&mut buf1)?; // model_type
+        r.read_exact(&mut buf1)?; // has_vocabulary
+        r.read_exact(&mut buf4)?; // search_version
+                                  // Skip counts
+        for _ in 0..order {
+            let mut buf8 = [0u8; 8];
+            r.read_exact(&mut buf8)?;
+        }
+
+        // Read vocabulary
+        let vocab = ProbingVocabulary::read_binary(&mut r)?;
+        // Read search tables
+        let search = HashedSearch::<BackoffValue>::read_binary(&mut r)?;
+
+        Ok(Self {
+            inner: GenericModel {
+                backing: BinaryFormat::new(),
+                vocab,
+                search,
+                _phantom: PhantomData,
+            },
+        })
+    }
+}
 
 // Type aliases for convenience
 pub type DefaultVocabulary = ProbingVocabulary;
@@ -556,7 +780,9 @@ mod tests {
     fn make_tiny_arpa() -> (tempfile::NamedTempFile, ProbingModel) {
         use std::io::Write;
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        write!(f, "\
+        write!(
+            f,
+            "\
 \\data\\
 ngram 1=3
 ngram 2=1
@@ -570,7 +796,9 @@ ngram 2=1
 -0.4\t<s> </s>
 
 \\end\\
-").unwrap();
+"
+        )
+        .unwrap();
         f.flush().unwrap();
         let path = f.path().to_str().unwrap().to_string();
         let model = ProbingModel::new(&path, &Config::new()).unwrap();
@@ -603,8 +831,8 @@ ngram 2=1
 
     #[test]
     fn has_extension_should_distinguish_positive_zero_from_negative_zero() {
-        assert!(has_extension(0.0_f32));           // +0.0 → has extension
-        assert!(!has_extension(-0.0_f32));          // -0.0 → no extension
+        assert!(has_extension(0.0_f32)); // +0.0 → has extension
+        assert!(!has_extension(-0.0_f32)); // -0.0 → no extension
     }
 
     #[test]
@@ -695,38 +923,47 @@ ngram 2=1
         let mut out = State::default();
         let _ret = model.full_score_forgot_state(&[], 0, &mut out);
     }
+
+    #[test]
+    fn base_score_matches_full_score_prob() {
+        let (_f, model) = make_tiny_arpa();
+        let in_state = ProbingModel::empty_context_state();
+        let word = model.vocab().index("</s>");
+        let mut out1 = State::default();
+        let mut out2 = State::default();
+        let full = Model::full_score(&model, &in_state, word, &mut out1);
+        let base = Model::base_score(&model, &in_state, word, &mut out2);
+        assert_eq!(base, full.prob, "base_score must equal full_score.prob");
+    }
+
+    #[test]
+    fn short_score_matches_full_score_prob() {
+        let (_f, model) = make_tiny_arpa();
+        let in_state = ProbingModel::empty_context_state();
+        let word = model.vocab().index("</s>");
+        let mut out1 = State::default();
+        let mut out2 = State::default();
+        let full = Model::full_score(&model, &in_state, word, &mut out1);
+        let short = Model::short_score(&model, &in_state, word, &mut out2);
+        assert_eq!(short, full.prob, "short_score must equal full_score.prob");
+    }
 }
 
-/// Load a model with automatic type detection
-/// Note: Model trait is not dyn compatible due to Sized requirement, so we return concrete types
+/// Load a model with automatic type detection.
+/// If the file is a KenLM binary (Probing type), loads directly from binary.
+/// Otherwise parses from ARPA and returns a ProbingModel.
 pub fn load_virtual(
     file_name: &str,
     config: &Config,
-    if_arpa: ModelType,
+    _if_arpa: ModelType,
 ) -> Result<DefaultModel, LMError> {
-    // TODO: Implement binary format recognition
-    // For now, just return the default model type
-    match if_arpa {
-        ModelType::Probing => ProbingModel::new(file_name, config),
-        ModelType::RestProbing => {
-            // Convert to default for now since we can't return different types
-            ProbingModel::new(file_name, config)
-        }
-        ModelType::Trie => {
-            // Convert to default for now since we can't return different types
-            ProbingModel::new(file_name, config)
-        }
-        ModelType::ArrayTrie => {
-            // Convert to default for now since we can't return different types
-            ProbingModel::new(file_name, config)
-        }
-        ModelType::QuantTrie => {
-            // Convert to default for now since we can't return different types
-            ProbingModel::new(file_name, config)
-        }
-        ModelType::QuantArrayTrie => {
-            // Convert to default for now since we can't return different types
-            ProbingModel::new(file_name, config)
+    use crate::ngram::binary_format::BinaryFormat;
+    // Detect binary format by magic bytes
+    if let Ok(Some(model_type)) = BinaryFormat::recognize_binary(file_name) {
+        if model_type == ModelType::Probing {
+            return ProbingModel::load_binary(file_name, config);
         }
     }
+    // Fall through to ARPA loading
+    ProbingModel::new(file_name, config)
 }

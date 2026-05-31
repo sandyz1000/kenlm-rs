@@ -213,6 +213,73 @@ impl BinaryFormat {
     pub fn set_vocab_string_offset(&mut self, offset: u64) {
         self.vocab_string_offset = offset;
     }
+
+    /// Write the binary file header (magic + FixedWidthParameters + counts) to a writer.
+    ///
+    /// Returns the byte offset immediately after the header (= start of model data).
+    pub fn write_header<W: std::io::Write>(
+        params: &Parameters,
+        w: &mut W,
+    ) -> Result<usize, LMError> {
+        use std::io::Write;
+        w.write_all(BINARY_MAGIC.as_bytes())?;
+        w.write_all(&[params.fixed.order])?;
+        w.write_all(&params.fixed.probing_multiplier.to_le_bytes())?;
+        w.write_all(&[params.fixed.model_type as u8])?;
+        w.write_all(&[params.fixed.has_vocabulary as u8])?;
+        w.write_all(&params.fixed.search_version.to_le_bytes())?;
+        for &count in &params.counts {
+            w.write_all(&count.to_le_bytes())?;
+        }
+        Ok(Self::calculate_header_size(params.fixed.order))
+    }
+
+    /// Write null-terminated vocabulary strings to a writer.
+    ///
+    /// Returns the number of bytes written (including null terminators).
+    pub fn write_vocab_words<W: std::io::Write>(
+        words: &[&str],
+        w: &mut W,
+    ) -> Result<usize, LMError> {
+        use std::io::Write;
+        let mut written = 0usize;
+        for word in words {
+            let bytes = word.as_bytes();
+            w.write_all(bytes)?;
+            w.write_all(&[0u8])?; // null terminator
+            written += bytes.len() + 1;
+        }
+        Ok(written)
+    }
+
+    /// Read vocabulary strings from a binary file at the given byte offset.
+    ///
+    /// Vocabulary is stored as a sequence of null-terminated strings. Reads until `total_bytes`.
+    pub fn read_vocab_words(data: &[u8], total_bytes: usize) -> Vec<String> {
+        let mut words = Vec::new();
+        let mut pos = 0usize;
+        let end = total_bytes.min(data.len());
+        while pos < end {
+            let null = data[pos..end].iter().position(|&b| b == 0);
+            match null {
+                Some(len) => {
+                    if let Ok(word) = std::str::from_utf8(&data[pos..pos + len]) {
+                        if !word.is_empty() {
+                            words.push(word.to_string());
+                        }
+                    }
+                    pos += len + 1;
+                }
+                None => break,
+            }
+        }
+        words
+    }
+
+    /// Compute the total byte size of a vocab section written by `write_vocab_words`.
+    pub fn vocab_section_size(words: &[&str]) -> usize {
+        words.iter().map(|w| w.len() + 1).sum()
+    }
 }
 
 impl Default for BinaryFormat {
@@ -304,5 +371,48 @@ mod tests {
 
         util::write_int57(&mut buffer, 8, 16, 0x1234);
         assert_eq!(util::read_int57(&buffer, 8, 16, 0xFFFF), 0x1234);
+    }
+
+    #[test]
+    fn header_round_trip() {
+        let params = Parameters {
+            fixed: FixedWidthParameters {
+                order: 3,
+                probing_multiplier: 1.5,
+                model_type: ModelType::Probing,
+                has_vocabulary: true,
+                search_version: 1,
+            },
+            counts: vec![100u64, 500, 1000],
+        };
+        let mut buf = Vec::new();
+        let header_size = BinaryFormat::write_header(&params, &mut buf).unwrap();
+        assert_eq!(header_size, buf.len());
+
+        // Re-read the header
+        let magic_len = BINARY_MAGIC.len();
+        assert_eq!(&buf[..magic_len], BINARY_MAGIC.as_bytes());
+        assert_eq!(buf[magic_len], 3); // order
+        let multiplier = f32::from_le_bytes(buf[magic_len+1..magic_len+5].try_into().unwrap());
+        assert!((multiplier - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vocab_round_trip() {
+        let words = vec!["<unk>", "<s>", "</s>", "hello", "world"];
+        let mut buf = Vec::new();
+        let written = BinaryFormat::write_vocab_words(&words, &mut buf).unwrap();
+        assert_eq!(written, buf.len());
+
+        let read_back = BinaryFormat::read_vocab_words(&buf, buf.len());
+        assert_eq!(read_back, words);
+    }
+
+    #[test]
+    fn vocab_section_size_matches_write() {
+        let words = vec!["a", "bb", "ccc"];
+        let mut buf = Vec::new();
+        BinaryFormat::write_vocab_words(&words, &mut buf).unwrap();
+        assert_eq!(BinaryFormat::vocab_section_size(&words), buf.len());
     }
 }

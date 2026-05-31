@@ -138,11 +138,19 @@ pub struct Bins {
 
 impl Bins {
     fn new(bits: u8, begin: Vec<f32>) -> Self {
-        Self { begin, bits, mask: crate::utils::bit_packing::mask_for_bits(bits) }
+        Self {
+            begin,
+            bits,
+            mask: crate::utils::bit_packing::mask_for_bits(bits),
+        }
     }
 
     pub fn populate(&mut self) -> &mut Vec<f32> {
         &mut self.begin
+    }
+
+    pub fn populate_ref(&self) -> &Vec<f32> {
+        &self.begin
     }
 
     pub fn encode_prob(&self, value: f32) -> u64 {
@@ -244,11 +252,7 @@ impl SeparatelyQuantize {
         }
     }
 
-    pub fn update_config_from_binary(
-        file: &BinaryFormat,
-        offset: u64,
-        config: &mut QuantConfig,
-    ) {
+    pub fn update_config_from_binary(file: &BinaryFormat, offset: u64, config: &mut QuantConfig) {
         // Read 3 bytes: version, prob_bits, backoff_bits
         let mut buffer = [0u8; 3];
 
@@ -303,9 +307,8 @@ impl SeparatelyQuantize {
 
     pub fn size(order: u8, config: &QuantConfig) -> u64 {
         let longest_table = (1u64 << config.prob_bits as u64) * std::mem::size_of::<f32>() as u64;
-        let middle_table =
-            (1u64 << config.backoff_bits as u64) * std::mem::size_of::<f32>() as u64
-                + longest_table;
+        let middle_table = (1u64 << config.backoff_bits as u64) * std::mem::size_of::<f32>() as u64
+            + longest_table;
         (order as u64 - 2) * middle_table + longest_table + 8
     }
 
@@ -334,7 +337,11 @@ impl SeparatelyQuantize {
             centers[0] = crate::constant::K_NO_EXTENSION_BACKOFF;
             centers[1] = crate::constant::K_EXTENSION_BACKOFF;
         }
-        make_bins(&mut backoff, &mut centers[2..], (1 << self.backoff_bits) - 2);
+        make_bins(
+            &mut backoff,
+            &mut centers[2..],
+            (1 << self.backoff_bits) - 2,
+        );
     }
 
     pub fn train_prob(&mut self, order: u8, prob: &mut Vec<f32>) {
@@ -348,6 +355,71 @@ impl SeparatelyQuantize {
             self.actual_base[1] = config.prob_bits;
             self.actual_base[2] = config.backoff_bits;
         }
+    }
+
+    /// Initialize quantization tables for ARPA loading (no binary header needed).
+    pub fn setup_tables_for_arpa(&mut self, order: u8, config: &QuantConfig) {
+        self.prob_bits = config.prob_bits;
+        self.backoff_bits = config.backoff_bits;
+        for i in 0..order.saturating_sub(2) as usize {
+            self.tables[i][0] = Bins::new(config.prob_bits, vec![0.0; 1 << config.prob_bits]);
+            self.tables[i][1] = Bins::new(config.backoff_bits, vec![0.0; 1 << config.backoff_bits]);
+        }
+        self.longest = Bins::new(config.prob_bits, vec![0.0; 1 << config.prob_bits]);
+    }
+
+    /// Train the longest layer's probability table.
+    pub fn train_longest_probs(&mut self, probs: &mut Vec<f32>) {
+        let centers = self.longest.populate();
+        make_bins(probs, centers, 1 << self.prob_bits);
+    }
+
+    /// Encode a middle layer (prob, backoff) pair into a packed integer.
+    pub fn encode_middle(&self, order_minus_2: usize, prob: f32, backoff: f32) -> u64 {
+        let tables = &self.tables[order_minus_2];
+        let prob_encoded = tables[0].encode_prob(prob);
+        let backoff_encoded = tables[1].encode_backoff(backoff);
+        let backoff_bits = tables[1].bits();
+        (prob_encoded << backoff_bits) | backoff_encoded
+    }
+
+    /// Decode a middle layer packed integer back to (prob, backoff).
+    pub fn decode_middle(&self, order_minus_2: usize, encoded: u64) -> (f32, f32) {
+        let tables = &self.tables[order_minus_2];
+        let backoff_bits = tables[1].bits();
+        let backoff_mask = if backoff_bits < 64 {
+            (1u64 << backoff_bits) - 1
+        } else {
+            u64::MAX
+        };
+        let backoff_idx = (encoded & backoff_mask) as usize;
+        let prob_idx = (encoded >> backoff_bits) as usize;
+        (tables[0].decode(prob_idx), tables[1].decode(backoff_idx))
+    }
+
+    /// Encode a longest layer probability into a packed integer.
+    pub fn encode_longest_prob(&self, prob: f32) -> u64 {
+        self.longest.encode_prob(prob)
+    }
+
+    /// Decode a longest layer packed integer back to prob.
+    pub fn decode_longest_prob(&self, encoded: u64) -> f32 {
+        self.longest.decode(encoded as usize)
+    }
+
+    pub fn prob_bits(&self) -> u8 {
+        self.prob_bits
+    }
+    pub fn backoff_bits(&self) -> u8 {
+        self.backoff_bits
+    }
+
+    pub fn get_tables_mut(&mut self, order_minus_2: usize) -> &mut [Bins; 2] {
+        &mut self.tables[order_minus_2]
+    }
+
+    pub fn longest_table_mut(&mut self) -> &mut Bins {
+        &mut self.longest
     }
 }
 

@@ -1,5 +1,5 @@
 /// Test reading ARPA files
-use kenlmrs::arpa::{read_arpa_counts, PositiveProbWarn};
+use kenlmrs::arpa_reader::{read_arpa_counts, PositiveProbWarn};
 use kenlmrs::constant::WarningAction;
 use kenlmrs::utils::pieces::file::FilePiece;
 use std::fs::File;

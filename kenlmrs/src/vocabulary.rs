@@ -211,6 +211,38 @@ impl ProbingVocabulary {
     pub fn word(&self, index: WordIndex) -> Option<&str> {
         self.index_to_word.get(index as usize).map(|s| s.as_str())
     }
+
+    /// Serialize vocabulary to a writer: [count: u32][for each: len(u32) + bytes]
+    pub fn write_binary<W: std::io::Write>(&self, w: &mut W) -> Result<(), crate::error::LMError> {
+        use std::io::Write;
+        let n = self.index_to_word.len() as u32;
+        w.write_all(&n.to_le_bytes())?;
+        for word in &self.index_to_word {
+            let bytes = word.as_bytes();
+            w.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            w.write_all(bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Deserialize vocabulary from a reader.
+    pub fn read_binary<R: std::io::Read>(r: &mut R) -> Result<Self, crate::error::LMError> {
+        use std::io::Read;
+        let mut buf4 = [0u8; 4];
+        r.read_exact(&mut buf4)?;
+        let n = u32::from_le_bytes(buf4) as usize;
+        let mut vocab = Self::new();
+        for _ in 0..n {
+            r.read_exact(&mut buf4)?;
+            let len = u32::from_le_bytes(buf4) as usize;
+            let mut bytes = vec![0u8; len];
+            r.read_exact(&mut bytes)?;
+            let word = String::from_utf8(bytes)
+                .map_err(|_| crate::error::LMError::FormatError("Invalid UTF-8 in vocab".into()))?;
+            vocab.add_word(&word);
+        }
+        Ok(vocab)
+    }
 }
 
 impl Default for ProbingVocabulary {
@@ -301,23 +333,34 @@ impl SortedVocabulary {
     }
 
     /// Insert a word into the vocabulary during loading
-    /// Returns the word index (1-based, with 0 reserved for <unk>)
+    /// Returns the word index (1-based, with 0 reserved for <unk>).
+    /// Returns the existing index if the word is already in the vocabulary.
     pub fn insert(&mut self, word: &str) -> WordIndex {
         let hash = hash_for_vocab(word);
-        
+
         // Check for special unknown tokens
         if hash == UNKNOWN_HASH || hash == UNKNOWN_CAP_HASH {
             self.base.set_saw_unk(true);
             return 0; // UNK_WORD
         }
-        
+
+        // Return existing index if word already present (deduplication).
+        if !self.sorted {
+            for (i, &h) in self.hashes.iter().enumerate() {
+                if h == hash {
+                    return (i + 1) as WordIndex;
+                }
+            }
+        } else if let Ok(pos) = self.hashes.binary_search(&hash) {
+            return (pos + 1) as WordIndex;
+        }
+
         self.hashes.push(hash);
         self.strings.push(word.to_string());
         self.sorted = false;
-        
-        // Return 1-based index (0 is reserved for <unk>)
+
         let index = self.hashes.len() as WordIndex;
-        self.base.set_bound(index + 1); // +1 to account for <unk> at 0
+        self.base.set_bound(index + 1);
         index
     }
 
@@ -363,6 +406,59 @@ impl SortedVocabulary {
     /// Get the number of words in vocabulary (including <unk>)
     pub fn size(&self) -> WordIndex {
         (self.hashes.len() + 1) as WordIndex
+    }
+
+    /// Serialize to binary: special indices, then hash+string pairs.
+    pub fn write_binary<W: std::io::Write>(&self, w: &mut W) -> Result<(), crate::error::LMError> {
+        use std::io::Write;
+        w.write_all(&self.base.begin_sentence.to_le_bytes())?;
+        w.write_all(&self.base.end_sentence.to_le_bytes())?;
+        w.write_all(&self.base.not_found.to_le_bytes())?;
+        w.write_all(&self.base.bound.to_le_bytes())?;
+        w.write_all(&(self.hashes.len() as u32).to_le_bytes())?;
+        for (hash, word) in self.hashes.iter().zip(self.strings.iter()) {
+            w.write_all(&hash.to_le_bytes())?;
+            let bytes = word.as_bytes();
+            w.write_all(&(bytes.len() as u32).to_le_bytes())?;
+            w.write_all(bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Deserialize from binary.
+    pub fn read_binary<R: std::io::Read>(r: &mut R) -> Result<Self, crate::error::LMError> {
+        use std::io::Read;
+        let mut buf4 = [0u8; 4];
+        let mut buf8 = [0u8; 8];
+        r.read_exact(&mut buf4)?;
+        let begin_sentence = u32::from_le_bytes(buf4);
+        r.read_exact(&mut buf4)?;
+        let end_sentence = u32::from_le_bytes(buf4);
+        r.read_exact(&mut buf4)?;
+        let not_found = u32::from_le_bytes(buf4);
+        r.read_exact(&mut buf4)?;
+        let bound = u32::from_le_bytes(buf4);
+        r.read_exact(&mut buf4)?;
+        let n = u32::from_le_bytes(buf4) as usize;
+        let mut hashes = Vec::with_capacity(n);
+        let mut strings = Vec::with_capacity(n);
+        for _ in 0..n {
+            r.read_exact(&mut buf8)?;
+            let hash = u64::from_le_bytes(buf8);
+            r.read_exact(&mut buf4)?;
+            let len = u32::from_le_bytes(buf4) as usize;
+            let mut bytes = vec![0u8; len];
+            r.read_exact(&mut bytes)?;
+            let word = String::from_utf8(bytes)
+                .map_err(|_| crate::error::LMError::FormatError("Invalid UTF-8 in vocab".into()))?;
+            hashes.push(hash);
+            strings.push(word);
+        }
+        let mut base = BaseVocabulary::new();
+        base.set_special(begin_sentence, end_sentence, not_found);
+        base.set_bound(bound);
+        // Hashes are stored in insertion order (vocab is never sorted during trie loading).
+        Ok(SortedVocabulary { base, hashes, strings, sorted: false })
     }
 }
 

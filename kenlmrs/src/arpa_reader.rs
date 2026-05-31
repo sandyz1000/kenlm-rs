@@ -454,7 +454,10 @@ mod tests {
             let warn = PositiveProbWarn::default();
             warn.warn(0.1);
         });
-        assert!(result.is_err(), "Default warn action should panic on positive prob");
+        assert!(
+            result.is_err(),
+            "Default warn action should panic on positive prob"
+        );
     }
 
     // ── read_ngram_header ─────────────────────────────────────────────────────
@@ -633,7 +636,14 @@ ngram 1=3
         let mut unigrams = vec![ProbBackoff::default(); 3];
         let warn = PositiveProbWarn::new(WarningAction::Silent);
 
-        read_1grams(&mut fp, counts[0] as usize, &mut vocab, &mut unigrams, &warn).unwrap();
+        read_1grams(
+            &mut fp,
+            counts[0] as usize,
+            &mut vocab,
+            &mut unigrams,
+            &warn,
+        )
+        .unwrap();
         read_end(&mut fp).unwrap();
     }
 }
